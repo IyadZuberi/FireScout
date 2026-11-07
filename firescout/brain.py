@@ -559,7 +559,8 @@ class Brain:
         for rel, db in obs.voices:
             wb = _wrap(yaw + rel)
             match = [tr for tr in self.tracker.tracks if tr.kind == 'warm' and tr.state != 'rejected'
-                     and abs(_wrap(math.atan2(tr.xy[1] - y, tr.xy[0] - x) - wb)) < VOICE_MATCH_RAD]
+                     and abs(_wrap(math.atan2(tr.xy[1] - y, tr.xy[0] - x) - wb))
+                     < (2 * VOICE_MATCH_RAD if tr.responsive else VOICE_MATCH_RAD)]
             if match:
                 for tr in match:
                     if not tr.responsive:
@@ -567,9 +568,9 @@ class Brain:
                         self.emit('HEAR', 'mic', f'voice {db:.0f}dB matches track#{tr.id}', 'marked responsive',
                                   'voice+thermal')
                 continue
-            new = self.voice_hint is None or abs(_wrap(self.voice_hint[2] - wb)) > 0.5
+            new = self.voice_hint is None or abs(_wrap(self.voice_hint[2] - wb)) > 0.8
             self.voice_hint = (x, y, wb, self.t)
-            if new or self.t - self._last_hear >= 8.0:
+            if (new and self.t - self._last_hear >= 3.0) or self.t - self._last_hear >= 12.0:
                 self._last_hear = self.t
                 self.emit('HEAR', 'mic', f'voice {db:.0f}dB bearing {math.degrees(wb):.0f}deg, no body seen there',
                           'searching toward the sound', 'voice-prior')

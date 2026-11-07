@@ -23,6 +23,7 @@ import mujoco
 import mujoco.viewer
 import numpy as np
 
+import audio
 import brain as B
 import report
 import scene
@@ -38,7 +39,11 @@ DEBUG = False
 # ------------------------------------------------------------------ images
 
 
-def map_image(b: B.Brain) -> np.ndarray:
+SEM_RGB = {1: (225, 225, 225), 2: (170, 120, 70)}  # wall white, furniture brown
+PRIO_RGB = {'P1': (255, 40, 40), 'P2': (255, 170, 0), 'P?': (255, 230, 0)}
+
+
+def map_image(b: B.Brain, rooms=None) -> np.ndarray:
     g = b.grid
     img = np.zeros((g.rows, g.cols, 3), np.float32)
     img[:] = (18, 18, 24)
@@ -49,7 +54,9 @@ def map_image(b: B.Brain) -> np.ndarray:
     img = img * (1 - a) + np.array([235, 60, 20]) * a
     gas = np.clip(g.gas / 1500, 0, 0.5)[..., None]
     img = img * (1 - gas) + np.array([230, 200, 40]) * gas
-    img[g.occ == 1] = (225, 225, 225)
+    sem = b.semantic()
+    for k, col in SEM_RGB.items():
+        img[sem == k] = col
     img = np.clip(img, 0, 255).astype(np.uint8)[::-1]
     out = np.ascontiguousarray(cv2.resize(img, (g.cols * SCALE, g.rows * SCALE), interpolation=cv2.INTER_NEAREST))
 
@@ -60,9 +67,19 @@ def map_image(b: B.Brain) -> np.ndarray:
         if path:
             pts = np.array([px(g.to_world(*c)) for c in path], np.int32)
             cv2.polylines(out, [pts], False, col, w, cv2.LINE_AA)
+    for k, (x0, y0, x1, y1, kind) in enumerate(rooms or []):
+        cv2.putText(out, f'R{k + 1}', px((x0 + 0.15, y1 - 0.45)), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (150, 170, 200), 1,
+                    cv2.LINE_AA)
+    if b.voice_hint and b.t - b.voice_hint[3] < 4.0:
+        hx, hy, hb, _ = b.voice_hint
+        cv2.arrowedLine(out, px((hx, hy)), px((hx + 4 * math.cos(hb), hy + 4 * math.sin(hb))), (255, 120, 255), 2,
+                        cv2.LINE_AA, tipLength=0.08)
     for tr in b.tracker.tracks:
         if tr.kind == 'warm' and tr.state in ('pinned', 'verify'):
-            cv2.circle(out, px(tr.xy), 7, (255, 40, 40) if tr.state == 'pinned' else (255, 200, 0), -1, cv2.LINE_AA)
+            lab = b.priority(tr)[0] if tr.state == 'pinned' else 'P?'
+            cv2.circle(out, px(tr.xy), 7, PRIO_RGB[lab], -1, cv2.LINE_AA)
+            cv2.putText(out, f'{lab} #{tr.id}', (px(tr.xy)[0] + 9, px(tr.xy)[1] + 4), cv2.FONT_HERSHEY_SIMPLEX, 0.42,
+                        PRIO_RGB[lab], 1, cv2.LINE_AA)
     for f in b.fires:
         cv2.drawMarker(out, px(f[:2]), (255, 140, 0), cv2.MARKER_TRIANGLE_UP, 12, 2)
     return out
@@ -93,8 +110,12 @@ def blob_label(b: B.Brain, blob: B.Blob) -> tuple[str, tuple[int, int, int]]:
 # ------------------------------------------------------------------ world events
 
 
+FIRE_GROW_S = 180.0    # time for a fire to reach full size (~1.8 m across, ~2x taller)
+SMOKE_FILL_S = 240.0   # time for the smoke layer to come down from the ceiling to ~1 m
+
+
 class World:
-    """Things the IC or the fire does to the world (main thread only)."""
+    """Things the IC or the fire does to the world (main thread only): fires grow and spread, smoke banks down."""
 
     def __init__(self, m, d, L, s: sensors.Sensors):
         self.m, self.d, self.L, self.s = m, d, L, s
@@ -104,16 +125,33 @@ class World:
         self.flames = [g for g in range(m.ngeom) if m.geom_matid[g] >= 0 and
                        (mujoco.mj_id2name(m, mujoco.mjtObj.mjOBJ_MATERIAL, m.geom_matid[g]) or '').startswith('flame')]
         self.base_size = {g: m.geom_size[g].copy() for g in self.flames}
+        self.base_pos = {g: m.geom_pos[g].copy() for g in self.flames}
+        self.flame_thing = {g: s.geom_thing[g] for g in self.flames}
         self.char = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_MATERIAL, 'char')
+        self.bed = {}  # fire thing -> its char/ember geoms (grow with the fire)
+        for i, t in enumerate(L.things):
+            if t.kind == 'fire':
+                gs = [g for g in np.where(m.geom_bodyid == s.thing_body[i])[0] if g not in self.base_size]
+                self.bed[i] = {int(g): m.geom_size[g].copy() for g in gs}
+        self.base_temp = dict(s.temp_by_thing)
+        self.t_lit = {i: 0.0 for i, t in enumerate(L.things) if t.kind == 'fire'}
         self.smoke = [mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_BODY, f'smoke{k}') for k in range(scene.N_SMOKE)]
+        self.smoke_mat = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_MATERIAL, 'smoke')
+        self.smoke_home = [self.d.mocap_pos[m.body_mocapid[b]].copy() for b in self.smoke]
+        self.smoke_size = [m.geom_size[m.body_geomadr[b]].copy() for b in self.smoke]
         self.rng = np.random.default_rng(L.seed)
         self.next_spread = SPREAD_EVERY
+
+    def growth(self, i: int) -> float:
+        return min(1.0, max(0.0, (self.d.time - self.t_lit[i]) / FIRE_GROW_S)) if i in self.t_lit else 0.0
 
     def ignite(self, i: int, temp=450.0) -> str:
         t = self.L.things[i]
         if self.s.temp_by_thing[i] >= sensors.FIRE_MIN_C or t.kind == 'casualty':
             return ''
         self.s.ignite(i, temp)
+        self.base_temp[i] = temp
+        self.t_lit[i] = self.d.time
         body = self.s.thing_body[i]
         for gid in np.where(self.m.geom_bodyid == body)[0]:
             if self.m.geom_group[gid] == 4:
@@ -122,17 +160,48 @@ class World:
                 self.m.geom_matid[gid] = self.char
         return f'{t.name} ignited ({temp:.0f} C)'
 
+    def grow(self):
+        """Fire development: hotter and wider over FIRE_GROW_S (heat the thermal camera, gas and O2 cells feel)."""
+        for i in self.t_lit:
+            if self.s.temp_by_thing[i] >= sensors.FIRE_MIN_C:
+                self.s.temp_by_thing[i] = min(950.0, self.base_temp[i] + 350.0 * self.growth(i))
+        for i, geoms in self.bed.items():
+            k = 1 + 2.2 * self.growth(i)
+            for g, base in geoms.items():
+                self.m.geom_size[g] = base * np.array([k, k, 1.0])
+
     def animate(self, t: float):
         for i, lid in self.lights.items():
-            self.m.light_diffuse[lid] = self.base_diffuse[i] * (0.75 + 0.25 * math.sin(t * 17 + i) * self.rng.random())
-        for g in self.flames:
-            k = 1 + 0.12 * math.sin(t * (9 + g % 5) + g) + 0.05 * self.rng.standard_normal()
-            self.m.geom_size[g] = self.base_size[g] * np.array([k, k, 1 + 0.2 * (k - 1)])
+            self.m.light_diffuse[lid] = self.base_diffuse[i] * (1 + 1.2 * self.growth(i)) * \
+                (0.7 + 0.3 * math.sin(t * 17 + i) * self.rng.random())
+        for g in self.flames:  # tongues: spread out, stretch and flicker independently
+            gr = self.growth(int(self.flame_thing[g]))
+            spread = 1 + 3.5 * gr
+            ph = g * 1.7
+            fl = 0.72 + 0.18 * math.sin(t * (7 + g % 6) + ph) + 0.1 * math.sin(t * 23 + 2 * ph) \
+                + 0.06 * self.rng.standard_normal()
+            r, _, h = self.base_size[g]
+            h2 = h * (1 + 1.1 * gr) * fl
+            bp = self.base_pos[g]
+            z0 = bp[2] - h * 0.8
+            self.m.geom_size[g] = [r * (1 + 0.6 * gr), r * 0.8 * (1 + 0.6 * gr), max(0.05, h2)]
+            self.m.geom_pos[g] = [bp[0] * spread + 0.03 * math.sin(t * 5 + ph), bp[1] * spread
+                                  + 0.03 * math.cos(t * 6 + ph), z0 + h2 * 0.8]
+        # smoke: hot layer under the ceiling that thickens, spreads and banks down over SMOKE_FILL_S
+        age = max([t - t0 for i, t0 in self.t_lit.items() if self.s.temp_by_thing[i] >= sensors.FIRE_MIN_C] or [0.0])
+        fill = min(1.0, age / SMOKE_FILL_S)
+        self.m.mat_rgba[self.smoke_mat][3] = 0.05 + 0.17 * fill
+        fires = [self.s._thing_xy(i) for i in self.t_lit if self.s.temp_by_thing[i] >= sensors.FIRE_MIN_C]
         for k, b in enumerate(self.smoke):
+            home = self.smoke_home[k]
+            f = fires[k % len(fires)] if fires else (self.L.width / 2, self.L.height / 2)
+            reach = 0.35 + 1.4 * fill
             p = self.d.mocap_pos[self.m.body_mocapid[b]]
-            p += np.array([0.12 * math.sin(t * 0.21 + k), 0.1 * math.cos(t * 0.17 + 2 * k), 0.0]) * FRAME_DT
-            p[0] = min(max(p[0], 0.5), self.L.width - 0.5)
-            p[1] = min(max(p[1], 0.5), self.L.height - 0.5)
+            p[0] = min(max(f[0] + (home[0] - f[0]) * reach + 0.25 * math.sin(t * 0.21 + k), 0.4), self.L.width - 0.4)
+            p[1] = min(max(f[1] + (home[1] - f[1]) * reach + 0.2 * math.cos(t * 0.17 + 2 * k), 0.4),
+                       self.L.height - 0.4)
+            p[2] = max(1.0, home[2] - 1.1 * fill)
+            self.m.geom_size[self.m.body_geomadr[b]] = self.smoke_size[k] * (1 + 0.5 * fill)
 
     def spread(self) -> str:
         if self.d.time < self.next_spread:
@@ -142,7 +211,8 @@ class World:
         cand = [(min(math.dist(self.s._thing_xy(i), f) for f in fires), i) for i, t in enumerate(self.L.things)
                 if self.s.temp_by_thing[i] < sensors.FIRE_MIN_C and t.kind != 'casualty' and t.style != 'pet'] \
             if fires else []
-        cand = [c for c in cand if c[0] <= 1.5]
+        reach = 1.2 + 1.6 * max([self.growth(i) for i in self.t_lit] or [0.0])
+        cand = [c for c in cand if c[0] <= reach]
         return self.ignite(min(cand)[1]) if cand else ''
 
 
@@ -235,34 +305,120 @@ def draw_overlays(scn, b: B.Brain, t: float, show_heat: bool):
     for tr in b.tracker.tracks:
         if tr.kind != 'warm' or tr.state not in ('pinned', 'verify'):
             continue
-        col = (1, 0.1, 0.1, 0.9) if tr.state == 'pinned' else (1, 0.8, 0, 0.8)
+        lab = b.priority(tr)[0] if tr.state == 'pinned' else 'P?'
+        col = [c / 255 for c in PRIO_RGB[lab]] + [0.9]
         _geom(scn, mujoco.mjtGeom.mjGEOM_CYLINDER, [0.012, 0.012, 0.6], [tr.xy[0], tr.xy[1], 0.6], col)
         _geom(scn, mujoco.mjtGeom.mjGEOM_SPHERE, [0.07 + 0.03 * pulse] * 3, [tr.xy[0], tr.xy[1], 1.25], col)
+        scn.geoms[scn.ngeom - 1].label = f'{lab} #{tr.id}' + (' calling' if tr.responsive else '')
+    if b.voice_hint and b.t - b.voice_hint[3] < 3.0:  # where the robot heard a voice from
+        hx, hy, hb, _ = b.voice_hint
+        _line(scn, [(hx + 0.4 * k * math.cos(hb), hy + 0.4 * k * math.sin(hb)) for k in range(1, 11, 2)
+                    for _ in (0,)], (1, 0.45, 1, 0.55), 0.03, 0.5)
 
 
-def hud_texts(b: B.Brain, o, w: BrainWorker, truth: dict, msg: str):
+def _ascii(txt: str) -> str:
+    """MuJoCo's overlay font is ASCII-only."""
+    return txt.replace('°', '').replace('→', '->').replace('²', '2')
+
+
+def hud_texts(b: B.Brain, o, w: BrainWorker, truth: dict, msg: str, building: str = ''):
     g = b.grid
     t = o.t
-    pinned = [tr for tr in b.tracker.tracks if tr.state == 'pinned']
+    pinned = sorted([tr for tr in b.tracker.tracks if tr.state == 'pinned'], key=lambda tr: -b.priority(tr)[1])
     possible = [tr for tr in b.tracker.tracks if tr.kind == 'warm' and tr.state == 'verify']
     first = next((c.t for c in b.cards if c.kind == 'PIN'), None)
     cov = 100 * (g.scanned & (g.occ == 0)).sum() / max(1, (g.occ == 0).sum())
     lat = np.array(w.lat) if w.lat else np.zeros(1)
     saved = (f'first casualty at T+{int(first) // 60}:{int(first) % 60:02d}, {CREW_ENTRY_S - first:.0f}s before crew entry'
              if first is not None and first < CREW_ENTRY_S else 'searching ahead of the crew')
-    left = ('FIRESCOUT\nMission clock\nMode\nRadio\nRobot health\nBrain loop (on-device)\n'
-            'Casualties\nFire seats\nFloor scanned\nTime saved')
-    right = (f'autonomous fire scout\nT+{int(t) // 60:02d}:{int(t) % 60:02d}   crew enters in {max(0, CREW_ENTRY_S - t):.0f}s\n'
-             f'{b.mode}\n{"LINKED" if o.comms else "LOST - working offline (" + str(len(b.outbox)) + " queued)"}\n'
-             f'{o.self_temp_c:.0f} C / 60 limit   battery {o.battery:.0%}   CO {o.gas_ppm:.0f} ppm\n'
+    heard = b.voice_hint is not None and t - b.voice_hint[3] < 4.0
+    cas = ', '.join(f'{b.priority(tr)[0]} #{tr.id}' for tr in pinned) or 'none yet'
+    left = ('FIRESCOUT\nBuilding\nMission clock\nMode\nSpeed\nRadio\nRobot health\nAir at robot\nMicrophones\n'
+            'Brain loop (on-device)\nConfirmed casualties\nPossible (crew check)\nFire seats\nFloor scanned\n'
+            'Time saved\nIC event\nGround truth (eval only)')
+    right = (f'autonomous fire scout\n{building}\n'
+             f'T+{int(t) // 60:02d}:{int(t) % 60:02d}   crew enters in {max(0, CREW_ENTRY_S - t):.0f}s\n'
+             f'{b.mode}{"   (IC override)" if b.ic_mode or b.ic_area else ""}\n'
+             f'{b.speed:.2f} m/s   {b.speed_why}\n'
+             f'{"LINKED" if o.comms else "LOST - working offline (" + str(len(b.outbox)) + " queued)"}\n'
+             f'{o.self_temp_c:.0f} C / 60 limit   battery {o.battery:.0%}\n'
+             f'CO {o.gas_ppm:.0f} ppm   O2 {o.o2_pct:.1f}%\n'
+             f'{"VOICE HEARD - steering toward it" if heard else "listening"}\n'
              f'p50 {np.percentile(lat, 50):.1f} ms   p95 {np.percentile(lat, 95):.1f} ms   (budget 50 ms)\n'
-             f'{len(pinned)} CONFIRMED (thermal+radar)   {len(possible)} possible\n{len(b.fires)}\n{cov:.0f}%\n{saved}')
-    cards = '\n'.join(str(c)[:118] for c in b.cards[-6:]) or 'starting mission...'
-    eval_txt = (f'EVALUATION OVERLAY (robot never sees this)\ncasualties in building: {truth["n"]}   '
-                f'correctly confirmed: {truth["ok"]}   false pins: {truth["fp"]}\n{msg}')
-    return [(mujoco.mjtFont.mjFONT_NORMAL, mujoco.mjtGridPos.mjGRID_TOPLEFT, left, right),
-            (mujoco.mjtFont.mjFONT_NORMAL, mujoco.mjtGridPos.mjGRID_BOTTOMLEFT, 'Decision log', cards),
-            (mujoco.mjtFont.mjFONT_NORMAL, mujoco.mjtGridPos.mjGRID_BOTTOMRIGHT, eval_txt, '')]
+             f'{len(pinned)}: {cas}\n{len(possible)}\n{len(b.fires)}\n{cov:.0f}%\n{saved}\n{msg[:70]}\n'
+             f'{truth["n"]} in building, {truth["ok"]} confirmed correctly, {truth["fp"]} false')
+    cards = '\n'.join(_ascii(str(c))[:100] for c in b.cards[-6:]) or 'starting mission...'
+    return [(mujoco.mjtFont.mjFONT_NORMAL, mujoco.mjtGridPos.mjGRID_TOPLEFT, left, _ascii(right)),
+            (mujoco.mjtFont.mjFONT_NORMAL, mujoco.mjtGridPos.mjGRID_BOTTOMLEFT, 'Decision log', cards)]
+
+
+FONT = cv2.FONT_HERSHEY_SIMPLEX
+WHITE, GREY, CYAN = (235, 235, 235), (150, 156, 168), (90, 200, 250)
+
+
+def _rows_image(rows, width=520, title='FIRESCOUT', sub_title='') -> np.ndarray:
+    """rows: [(label, value, rgb)] -> dark translucent-looking panel."""
+    h = 52 + 21 * len(rows)
+    img = np.full((h, width, 3), (20, 22, 28), np.uint8)
+    cv2.putText(img, title, (12, 27), FONT, 0.72, CYAN, 2, cv2.LINE_AA)
+    cv2.putText(img, sub_title, (150, 27), FONT, 0.45, GREY, 1, cv2.LINE_AA)
+    for k, (lab, val, col) in enumerate(rows):
+        y = 52 + 21 * k
+        cv2.putText(img, lab, (12, y), FONT, 0.43, GREY, 1, cv2.LINE_AA)
+        cv2.putText(img, _ascii(str(val))[:52], (168, y), FONT, 0.45, col, 1, cv2.LINE_AA)
+    return img
+
+
+def hud_image(b: B.Brain, o, w, truth: dict, msg: str, building: str = '') -> np.ndarray:
+    g = b.grid
+    t = o.t
+    pinned = sorted([tr for tr in b.tracker.tracks if tr.state == 'pinned'], key=lambda tr: -b.priority(tr)[1])
+    possible = [tr for tr in b.tracker.tracks if tr.kind == 'warm' and tr.state == 'verify']
+    first = next((c.t for c in b.cards if c.kind == 'PIN'), None)
+    cov = 100 * (g.scanned & (g.occ == 0)).sum() / max(1, (g.occ == 0).sum())
+    lat = np.array(w.lat) if w.lat else np.zeros(1)
+    heard = b.voice_hint is not None and t - b.voice_hint[3] < 4.0
+    red, amber, green = (255, 80, 70), (255, 190, 40), (90, 230, 120)
+    rows = [
+        ('Building', building, WHITE),
+        ('Mission clock', f'T+{int(t) // 60:02d}:{int(t) % 60:02d}   crew enters in {max(0, CREW_ENTRY_S - t):.0f}s',
+         WHITE),
+        ('Mode', b.mode + ('  (IC override)' if b.ic_mode or b.ic_area else ''),
+         amber if b.mode in ('RETREAT', 'IC_STOP', 'RECALL', 'HOLD') else green),
+        ('Speed', f'{b.speed:.2f} m/s  {b.speed_why}', WHITE),
+        ('Radio', 'LINKED' if o.comms else f'LOST - offline, {len(b.outbox)} queued', green if o.comms else red),
+        ('Robot health', f'{o.self_temp_c:.0f} C / 60 limit   battery {o.battery:.0%}',
+         red if o.self_temp_c > 50 else WHITE),
+        ('Air at robot', f'CO {o.gas_ppm:.0f} ppm   O2 {o.o2_pct:.1f}%',
+         red if o.gas_ppm > 400 or o.o2_pct < 17 else WHITE),
+        ('Microphones', 'VOICE HEARD - steering to it' if heard else 'listening', (255, 120, 255) if heard else WHITE),
+        ('Brain loop', f'p50 {np.percentile(lat, 50):.1f} ms  p95 {np.percentile(lat, 95):.1f} ms  (on-device)',
+         WHITE),
+        ('Fire seats', f'{len(b.fires)} located', amber if b.fires else WHITE),
+        ('Floor scanned', f'{cov:.0f}%  (never declared clear)', WHITE),
+        ('First casualty', 'searching' if first is None else
+         f'T+{int(first) // 60}:{int(first) % 60:02d}  ({CREW_ENTRY_S - first:.0f}s before crew)', green),
+        ('Confirmed', f'{len(pinned)}  (thermal + radar breathing)', red if pinned else WHITE),
+    ]
+    for tr in pinned[:4]:
+        lab, _, why = b.priority(tr)
+        rows.append((f'   {lab}  #{tr.id}', why, PRIO_RGB[lab]))
+    rows += [('Possible', f'{len(possible)}  (crew must check)', amber if possible else WHITE),
+             ('IC event', msg[-52:], CYAN),
+             ('Eval only', f'{truth["n"]} in building / {truth["ok"]} found / {truth["fp"]} false', GREY)]
+    return _rows_image(rows, sub_title='autonomous fire scout - live')
+
+
+def log_image(b: B.Brain, width=900) -> np.ndarray:
+    cards = b.cards[-7:]
+    img = np.full((40 + 20 * max(1, len(cards)), width, 3), (20, 22, 28), np.uint8)
+    cv2.putText(img, 'DECISION LOG  (every action + the sensor reading that caused it)', (12, 24), FONT, 0.5, CYAN,
+                1, cv2.LINE_AA)
+    col = {'RETREAT': (255, 90, 70), 'PIN': (255, 80, 80), 'PRIORITY': (255, 120, 90), 'REPLAN': (255, 190, 40),
+           'HEAR': (255, 120, 255), 'IC': (90, 200, 250), 'COMMS': (255, 190, 40), 'HOLD': (255, 190, 40)}
+    for k, c in enumerate(cards):
+        cv2.putText(img, _ascii(str(c))[:118], (12, 46 + 20 * k), FONT, 0.42, col.get(c.kind, WHITE), 1, cv2.LINE_AA)
+    return img
 
 
 def truth_score(L, b) -> dict:
@@ -321,15 +477,14 @@ def rerun_init(save):
 class ControlPanel:
     """Incident Commander control window (tkinter, stdlib): buttons queue actions for the sim loop."""
 
-    def __init__(self):
+    def __init__(self, rooms=()):
         import tkinter as tk
         self.tk = tk
         self.root = tk.Tk()
         self.root.title('FireScout - IC control')
         self.root.configure(bg='#16181d')
         self.root.attributes('-topmost', True)
-        sw = self.root.winfo_screenwidth()
-        self.root.geometry(f'+{sw - 560}+40')  # top-right corner, clear of the viewer HUD
+
         self.actions: list[str] = []
         self.root.protocol('WM_DELETE_WINDOW', lambda: self.actions.append('quit'))
         tk.Label(self.root, text='FireScout · Incident Commander', fg='#5ac8fa', bg='#16181d',
@@ -338,14 +493,25 @@ class ControlPanel:
                 ('Toggle radio drop', 'comms'), ('METHANE report', 'methane'),
                 ('Candidate IS a person', 'yes'), ('Candidate NOT a person', 'no'),
                 ('Camera: overview', 'cam_over'), ('Camera: follow robot', 'cam_follow'),
-                ('Camera: robot eye', 'cam_eye'), ('Toggle floor heatmap', 'heat')]
+                ('Camera: robot eye', 'cam_eye'), ('Toggle floor heatmap', 'heat'),
+                ('IC: STOP robot', 'ic_stop'), ('IC: RESUME autonomy', 'ic_resume'),
+                ('IC: RECALL to entry', 'ic_recall'), ('Sound on / off', 'audio')]
         for k, (label, act) in enumerate(btns):
             tk.Button(self.root, text=label, width=28, font=('Segoe UI', 10), bg='#2a2e37', fg='white',
                       activebackground='#3d4350', relief='flat',
                       command=lambda a=act: self.actions.append(a)).grid(row=1 + k // 2, column=k % 2, padx=6, pady=3)
+        r0 = 1 + (len(btns) + 1) // 2
+        tk.Label(self.root, text='IC: search this room first', fg='#9aa4b2', bg='#16181d',
+                 font=('Segoe UI', 9)).grid(row=r0, column=0, columnspan=2, pady=(8, 2))
+        for k, (x0, y0, x1, y1, kind) in enumerate(rooms):
+            tk.Button(self.root, text=f'R{k + 1} {kind}', width=28, font=('Segoe UI', 9), bg='#243042', fg='white',
+                      relief='flat', command=lambda a=f'room{k}': self.actions.append(a)
+                      ).grid(row=r0 + 1 + k // 2, column=k % 2, padx=6, pady=2)
         self.status = tk.Label(self.root, text='', fg='#e6e6e6', bg='#16181d', font=('Consolas', 10),
                                justify='left', anchor='w')
-        self.status.grid(row=7, column=0, columnspan=2, sticky='we', padx=10, pady=(6, 10))
+        self.status.grid(row=r0 + 2 + len(rooms) // 2, column=0, columnspan=2, sticky='we', padx=10, pady=(6, 10))
+        self.root.update_idletasks()  # top-right corner, fully on screen at any DPI
+        self.root.geometry(f'+{self.root.winfo_screenwidth() - self.root.winfo_reqwidth() - 12}+40')
 
     def poll(self, msg: str, mode: str) -> list[str]:
         self.status.config(text=f'mode: {mode}' + chr(10) + msg[-70:])
@@ -357,18 +523,57 @@ class ControlPanel:
         return acts
 
 
+def launcher(preset='care_home', casualties=2, fires=1, seed=11):
+    """Scenario picker shown before the run: building, casualties, fires, layout seed."""
+    import tkinter as tk
+    from tkinter import ttk
+    root = tk.Tk()
+    root.title('FireScout - choose scenario')
+    root.configure(bg='#16181d', padx=18, pady=14)
+    names = {v['name']: k for k, v in scene.PRESETS.items()}
+    vb = tk.StringVar(value=scene.PRESETS[preset]['name'])
+    vc, vf, vs = tk.IntVar(value=casualties), tk.IntVar(value=fires), tk.IntVar(value=seed)
+    tk.Label(root, text='FireScout scenario', fg='#5ac8fa', bg='#16181d', font=('Segoe UI', 14, 'bold')
+             ).grid(row=0, column=0, columnspan=2, pady=(0, 10))
+    rows = [('Building', ttk.Combobox(root, textvariable=vb, values=list(names), state='readonly', width=26)),
+            ('Casualties (0-4)', tk.Spinbox(root, from_=0, to=4, textvariable=vc, width=6)),
+            ('Fires (1-3)', tk.Spinbox(root, from_=1, to=3, textvariable=vf, width=6)),
+            ('Layout seed', tk.Spinbox(root, from_=0, to=9999, textvariable=vs, width=8))]
+    for k, (lab, wdg) in enumerate(rows):
+        tk.Label(root, text=lab, fg='#e6e6e6', bg='#16181d', font=('Segoe UI', 10)).grid(row=k + 1, column=0,
+                                                                                         sticky='w', pady=4)
+        wdg.grid(row=k + 1, column=1, sticky='w', pady=4)
+    out = {}
+
+    def go():
+        out.update(preset=names[vb.get()], casualties=int(vc.get()), fires=int(vf.get()), seed=int(vs.get()))
+        root.destroy()
+    tk.Button(root, text='Start mission', command=go, bg='#2f7d32', fg='white', relief='flat', width=20,
+              font=('Segoe UI', 11, 'bold')).grid(row=6, column=0, columnspan=2, pady=(12, 0))
+    root.mainloop()
+    return out or None
+
+
 # ------------------------------------------------------------------ main
 
 
-def main(seed: int = 11, use_rerun: bool = False, save: str | None = None, ignite_shelf_at: float | None = None):
-    L = scene.generate_layout(seed)
+def main(seed: int = 11, use_rerun: bool = False, save: str | None = None, ignite_shelf_at: float | None = None,
+         preset: str = 'care_home', casualties: int | None = None, fires: int | None = None, sound: bool = True,
+         quit_after: float | None = None):
+    L = scene.generate_layout(seed, preset, casualties, fires)
+    rooms = [(*r, k) for r, k in zip(L.rooms, L.room_kinds)]
+    building = (f'{scene.PRESETS[preset]["name"]}, {L.width:.0f} x {L.height:.0f} m, {len(L.rooms)} rooms '
+                f'(seed {seed})')
+    player = audio.Player(sound)
+    heard_window: dict[int, int] = {}
+    last_breath = -99.0
     m, d = scene.load(L)
     w = BrainWorker(m, d, L, seed, use_rerun)
     if use_rerun:
         rerun_init(save)
     w.start()
     world = World(m, d, L, w.s)
-    panel = ControlPanel()
+    panel = ControlPanel(rooms)
     shelf = next(i for i, t in enumerate(L.things) if t.kind == 'shelf')
     scout = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_BODY, 'scout')
     eye = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_CAMERA, 'thermal')
@@ -397,27 +602,55 @@ def main(seed: int = 11, use_rerun: bool = False, save: str | None = None, ignit
             if d.time < target - 0.5:  # brain fell behind: don't fast-forward later
                 wall0, sim0 = time.perf_counter(), d.time
             tm.append(time.perf_counter())
+            world.grow()
             msg = world.spread() or msg
             if ignite_shelf_at is not None and d.time >= ignite_shelf_at:
                 msg, ignite_shelf_at = world.ignite(shelf) or msg, None
-            pip, texts = None, None
+            pip, texts, vstate = None, None, None
             with v.lock():
                 world.animate(d.time)
                 if w.obs is not None:
                     with w.lock:
                         draw_overlays(v.user_scn, w.b, d.time, show_heat)
-                        texts = hud_texts(w.b, w.obs, w, truth_score(L, w.b), msg)
-                        minimap = map_image(w.b)
+                        hud = hud_image(w.b, w.obs, w, truth_score(L, w.b), msg, building)
+                        logi = log_image(w.b)
+                        texts = True
+                        minimap = map_image(w.b, rooms)
+                        vstate = (w.b.mode, w.obs.breath, w.cmd.want_breath_xy)
                     pip = v.viewport
             # set_images/set_texts wait for the render thread: never call them while holding v.lock()
-            if texts is not None and frames % 3 == 0:
-                if pip is not None and w.thermal_rgb is not None:
-                    th = cv2.resize(w.thermal_rgb, (384, 288))
-                    mh = int(384 * minimap.shape[0] / minimap.shape[1])
-                    mm = cv2.resize(minimap, (384, mh))
-                    v.set_images([(mujoco.MjrRect(pip.width - 394, pip.height - 298, 384, 288), th),
-                                  (mujoco.MjrRect(pip.width - 394, pip.height - 308 - mh, 384, mh), mm)])
-                v.set_texts(texts)
+            if texts is not None and frames % 3 == 0 and pip is not None:
+                sc = pip.width / 1500  # panels scale with the window (high-DPI safe)
+                ims = []
+                hw = int(520 * sc)
+                hh = int(hud.shape[0] * hw / hud.shape[1])
+                ims.append((mujoco.MjrRect(8, pip.height - hh - 8, hw, hh), cv2.resize(hud, (hw, hh))))
+                lw = int(900 * sc)
+                lh = int(logi.shape[0] * lw / logi.shape[1])
+                ims.append((mujoco.MjrRect(8, 8, lw, lh), cv2.resize(logi, (lw, lh))))
+                if w.thermal_rgb is not None:
+                    tw = int(440 * sc)
+                    th_h = int(tw * 0.75)
+                    mh = int(tw * minimap.shape[0] / minimap.shape[1])
+                    ims.append((mujoco.MjrRect(pip.width - tw - 8, 8, tw, th_h), cv2.resize(w.thermal_rgb, (tw, th_h))))
+                    ims.append((mujoco.MjrRect(pip.width - tw - 8, 16 + th_h, tw, mh), cv2.resize(minimap, (tw, mh))))
+                v.set_images(ims)
+                v.set_texts([(mujoco.mjtFontScale.mjFONTSCALE_100, mujoco.mjtGridPos.mjGRID_TOPRIGHT,
+                              'Ctrl+right-drag any object', 'unscripted change')])  # images only draw with a text set
+            if w.obs is not None and player.on:  # what the robot's mics hear, on the laptop speakers
+                for i, th in enumerate(L.things):
+                    if th.kind != 'casualty' or not th.responsive or (d.time + 2.3 * i) % 7.0 >= 2.0:
+                        continue
+                    win = int((d.time + 2.3 * i) // 7.0)
+                    if heard_window.get(i) != win and w.obs.voices:
+                        heard_window[i] = win
+                        sex = th.style[0] if th.style else 'f'
+                        player.play(f'{"help" if win % 2 else "here"}_{sex}', max(db for _, db in w.obs.voices))
+                if texts is not None and vstate[0] == 'VERIFY' and (vstate[1] or 0) > 0.5 and vstate[2] \
+                        and d.time - last_breath > 6.5:
+                    dist_c = math.dist(w.s._robot_xy(), vstate[2])
+                    if player.play('breath', 60 - 8 * dist_c, 6.4):
+                        last_breath = d.time
             tm.append(time.perf_counter())
             v.sync()
             tm.append(time.perf_counter())
@@ -448,6 +681,20 @@ def main(seed: int = 11, use_rerun: bool = False, save: str | None = None, ignit
                         print(report.methane(w.b))
                 elif act == 'heat':
                     show_heat = not show_heat
+                elif act in ('ic_stop', 'ic_resume', 'ic_recall'):
+                    with w.lock:
+                        w.b.ic(act[3:])
+                    msg = f'IC: {act[3:].upper()} sent to robot'
+                elif act.startswith('room'):
+                    x0, y0, x1, y1, kind = rooms[int(act[4:])]
+                    with w.lock:
+                        w.b.ic('SEARCH', area=(x0, y0, x1, y1))
+                    msg = f'IC: search R{int(act[4:]) + 1} ({kind}) first'
+                elif act == 'audio':
+                    player.on = not player.on and player.ws is not None
+                    if not player.on:
+                        player.stop()
+                    msg = f'sound {"on" if player.on else "off"}'
                 elif act.startswith('cam_'):
                     with v.lock():
                         if act == 'cam_over':
@@ -463,6 +710,8 @@ def main(seed: int = 11, use_rerun: bool = False, save: str | None = None, ignit
                             v.cam.fixedcamid = eye
                 elif act == 'quit':
                     v.close()
+            if quit_after is not None and d.time >= quit_after:
+                v.close()
             time.sleep(max(0.0, FRAME_DT - (time.perf_counter() - frame0)))
     panel.root.destroy()
     print(report.methane(w.b))
@@ -475,6 +724,17 @@ if __name__ == '__main__':
     ap.add_argument('--save', default=None, help='with --rerun: also record to this .rrd file')
     ap.add_argument('--ignite-shelf-at', type=float, default=None, help='sim seconds; for scripted rehearsals')
     ap.add_argument('--debug', action='store_true')
+    ap.add_argument('--preset', choices=list(scene.PRESETS), default=None, help='building; omit to get the picker')
+    ap.add_argument('--casualties', type=int, default=None)
+    ap.add_argument('--fires', type=int, default=None)
+    ap.add_argument('--no-sound', action='store_true')
+    ap.add_argument('--quit-after', type=float, default=None, help='sim seconds, then print METHANE and exit')
     a = ap.parse_args()
     DEBUG = a.debug
-    main(a.seed, a.rerun, a.save, a.ignite_shelf_at)
+    cfg = dict(preset=a.preset, casualties=a.casualties, fires=a.fires, seed=a.seed)
+    if a.preset is None:
+        cfg = launcher(seed=a.seed)
+        if cfg is None:
+            raise SystemExit(0)
+    main(cfg['seed'], a.rerun, a.save, a.ignite_shelf_at, cfg['preset'], cfg['casualties'], cfg['fires'],
+         not a.no_sound, a.quit_after)
