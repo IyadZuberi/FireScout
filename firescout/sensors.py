@@ -60,6 +60,8 @@ class Sensors:
                                     for b in gb], dtype=np.int32)
         self.floor_geom = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, 'floor')
         self.cam = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_CAMERA, 'thermal')
+        self.vopt = mujoco.MjvOption()
+        self.vopt.flags[mujoco.mjtVisFlag.mjVIS_RANGEFINDER] = 0  # sensor sees the world, not debug rays
 
     # -- ground-truth helpers (never exported to the brain) --
     def ignite(self, i: int, temp_c: float = 450.0) -> None:
@@ -91,7 +93,8 @@ class Sensors:
 
     def _thermal_and_depth(self):
         r = self.r
-        r.update_scene(self.d, self.cam)
+        r.update_scene(self.d, self.cam, scene_option=self.vopt)
+        r.scene.flags[mujoco.mjtRndFlag.mjRND_REFLECTION] = 0  # no mirror images of fires on the floor
         r.enable_segmentation_rendering()
         seg = r.render()
         r.disable_segmentation_rendering()
@@ -107,7 +110,7 @@ class Sensors:
         return thermal, depth
 
     def _rgb(self):
-        self.r.update_scene(self.d, self.cam)
+        self.r.update_scene(self.d, self.cam, scene_option=self.vopt)
         self.r.scene.flags[mujoco.mjtRndFlag.mjRND_FOG] = 1
         return self.r.render().copy()
 

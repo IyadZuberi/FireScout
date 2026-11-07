@@ -132,7 +132,7 @@ def _thing_geoms(i: int, t: Thing) -> str:
 
     if t.kind == 'fire':
         add(type='box', size=_f(0.3, 0.3, 0.05), pos=_f(0, 0, 0.05), material='ember')
-        for k, (r, z, mat) in enumerate(((0.28, 0.25, 'flame0'), (0.2, 0.55, 'flame1'), (0.12, 0.8, 'flame2'))):
+        for k, (r, z, mat) in enumerate(((0.34, 0.3, 'flame0'), (0.26, 0.75, 'flame1'), (0.16, 1.15, 'flame2'))):
             add(type='ellipsoid', size=_f(r, r, r * 1.4), pos=_f(0, 0, z), material=mat,
                 contype='0', conaffinity='0', group='1')
     elif t.kind == 'casualty':  # lying figure along local x
@@ -170,7 +170,7 @@ def build_mjcf(layout: Layout) -> str:
     for i, t in enumerate(layout.things):
         light = ''
         if t.kind == 'fire':
-            light = (f'<light name="firelight{i}" type="point" pos="0 0 0.9" diffuse="1 0.5 0.1" '
+            light = (f'<light name="firelight{i}" type="point" pos="0 0 1.0" diffuse="1.6 0.8 0.15" '
                      f'specular="0.3 0.15 0.05" attenuation="1 0.2 0.6" castshadow="false"/>')
         things.append(
             f'<body name="thing{i}" pos="{_f(t.xy[0], t.xy[1], 0.01)}" euler="0 0 {math.degrees(t.yaw):.3g}">\n'

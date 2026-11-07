@@ -195,10 +195,22 @@ def detect_blobs(thermal, depth, pose, hfov_deg: float = HFOV_DEG) -> list[Blob]
         dvals = dvals[np.isfinite(dvals) & (dvals > 0)]
         if dvals.size == 0:
             continue
-        r = float(np.median(dvals))
         temps = thermal[mask]
         peak = float(temps.max())
         kind = 'fire' if peak > FIRE_C else 'warm'
+        if kind == 'fire':
+            # range only from the hot core (blur halo spills onto nearer door frames); flames are translucent,
+            # so take the near side of the core; ignore fires beyond radar range
+            core = mask & (thermal >= max(FIRE_C, 0.7 * peak))
+            cd = depth[core]
+            cd = cd[np.isfinite(cd) & (cd > 0)]
+            if cd.size == 0:
+                continue
+            r = float(np.percentile(cd, 20)) + 0.3  # near surface -> centre of a ~0.6 m fire seat
+            if r > 6.3:
+                continue
+        else:
+            r = float(np.median(dvals))
         bearing = yaw + math.atan((cx - cent[k][0]) / fx)
         out.append(Blob(kind, (x + r * math.cos(bearing), y + r * math.sin(bearing)),
                         peak if kind == 'fire' else float(np.median(temps)),
@@ -403,6 +415,7 @@ class Brain:
         self._verify_fail: dict[int, float] = {}
         self._dist = None
         self._parent = None
+        self.last_blobs: list[Blob] = []
         ys, xs = np.mgrid[0:self.grid.rows, 0:self.grid.cols]
         self._cx, self._cy = (xs + 0.5) * RES, (ys + 0.5) * RES
 
@@ -458,6 +471,7 @@ class Brain:
         integrate_ranges(g, obs.pose, obs.ranges)
         g.occ[here] = 0
         blobs = detect_blobs(obs.thermal, obs.depth, obs.pose)
+        self.last_blobs = blobs
         for b in blobs:
             if b.kind == 'fire':
                 self._paint_heat(b.xy, b.temp_c)
@@ -532,7 +546,7 @@ class Brain:
         m = (self._cx - xy[0]) ** 2 + (self._cy - xy[1]) ** 2 <= 0.35 ** 2
         self.grid.heat[m] = np.maximum(self.grid.heat[m], temp)
         for k, (fx, fy, ft) in enumerate(self.fires):
-            if math.dist((fx, fy), xy) < 0.6:
+            if math.dist((fx, fy), xy) < 1.2:
                 self.fires[k] = (fx, fy, max(ft, temp))
                 return
         self.fires.append((xy[0], xy[1], temp))
