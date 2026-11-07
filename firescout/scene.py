@@ -45,6 +45,12 @@ def asset_meta() -> dict:
     return json.load(open(p)) if os.path.exists(p) else {}
 
 
+def human_meta() -> dict:
+    """Posed casualty meshes from humans.py (Quaternius CC0); {} if not built."""
+    p = os.path.join(ASSET_DIR, 'humans.json')
+    return json.load(open(p)) if os.path.exists(p) else {}
+
+
 @dataclass
 class Thing:
     name: str
@@ -190,9 +196,17 @@ def generate_layout(seed: int, n_rooms: int = 5) -> Layout:
 
     for _ in range(int(rng.integers(1, 3))):
         place('fire', (0.6, 0.6, 0.9), float(rng.uniform(400, 700)))
+    hm = human_meta()
     for _ in range(int(rng.integers(0, 3))):
-        place('casualty', (1.7, 0.5, 0.3), float(rng.uniform(34, 37)), near_bed=rng.random() < 0.7,
-              breathing=True, yaw=float(rng.choice([0.0, math.pi]) + rng.uniform(-0.3, 0.3)))
+        size, style = (1.7, 0.5, 0.3), ''
+        if hm:  # style = "<sex>_<pose>|<outfit>|<hair>"
+            sex = 'm' if rng.random() < 0.5 else 'f'
+            pose = str(rng.choice(['supine', 'prone', 'recovery']))
+            sx_, sy_, sz_ = hm['variants'][f'{sex}_{pose}']['size']
+            size = (sx_, sy_, sz_)
+            style = f'{sex}_{pose}|{sex}{int(rng.integers(2))}|{"grey" if rng.random() < 0.7 else "dark"}'
+        place('casualty', size, float(rng.uniform(34, 37)), near_bed=rng.random() < 0.7,
+              breathing=True, yaw=float(rng.choice([0.0, math.pi]) + rng.uniform(-0.3, 0.3)), style=style)
     decoys = [('radiator', (0.08, 0.55, 0.5), float(rng.uniform(45, 60))),
               ('pipe', (1.2, 0.12, 0.12), 70.0),
               ('pet', (0.4, 0.3, 0.3), 38.0)]
@@ -245,6 +259,10 @@ def _thing_geoms(i: int, t: Thing, rng, meta) -> str:
                                          (0.12, 1.4, 'flame3'))):
             add(type='ellipsoid', size=_f(r, r * 0.9, r * 1.5), pos=_f(0.03 * k, -0.02 * k, z), material=mat,
                 contype='0', conaffinity='0', group='1')
+    elif t.kind == 'casualty' and t.style:
+        v, outfit, hair = t.style.split('|')
+        add(type='mesh', mesh=f'human_{v}', material=f'cloth_{outfit}')
+        add(type='mesh', mesh=f'human_{v}_hair', material=f'hair_{hair}', contype='0', conaffinity='0', mass='0.01')
     elif t.kind == 'casualty':
         _human(add, rng)
     elif t.style == 'radiator':
@@ -344,9 +362,19 @@ def build_mjcf(layout: Layout) -> str:
         f'<mesh name="{k}" file="{k}.obj" scale="{_f(*PROP_SPEC[k][0])}"/>'
         f'<material name="m{k}" rgba="{_f(*v["rgb"])} 1" specular="0.35" shininess="0.4"/>'
         for k, v in meta.items())
+    hm = human_meta()
+    used = sorted({t.style.split('|')[0] for t in layout.things if t.kind == 'casualty' and t.style})
+    if used and hm:
+        mesh_assets += ''.join(f'<mesh name="human_{v}" file="human_{v}.obj"/>'
+                               f'<mesh name="human_{v}_hair" file="human_{v}_hair.obj" inertia="shell"/>' for v in used)
+        mesh_assets += ''.join(f'<texture name="tcloth_{k}" type="2d" file="tex_human_{k}.png"/>'
+                               f'<material name="cloth_{k}" texture="tcloth_{k}" specular="0.15" shininess="0.2"/>'
+                               for k in hm['outfits'])
+        mesh_assets += '<texture name="thair" type="2d" file="tex_hair.png"/>' + ''.join(
+            f'<material name="hair_{k}" texture="thair" rgba="{_f(*c)} 1" specular="0.2"/>' for k, c in hm['hair'].items())
     sx, sy = layout.start
     return f"""<mujoco model="firescout">
-  <compiler meshdir="{ASSET_DIR.replace(os.sep, '/')}"/>
+  <compiler meshdir="{ASSET_DIR.replace(os.sep, '/')}" texturedir="{ASSET_DIR.replace(os.sep, '/')}"/>
   <option timestep="0.005"/>
   <visual>
     <quality shadowsize="4096" offsamples="2"/>

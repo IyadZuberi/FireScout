@@ -3,3 +3,4 @@ numpy
 opencv-python
 rerun-sdk>=0.42
 pytest
+pillow  # build-time only: humans.py
