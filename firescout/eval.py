@@ -112,7 +112,7 @@ def run_episode(seed: int, t_max: float = 180.0) -> dict:
                    for tr in b.tracker.tracks)
     return dict(seed=seed, t_first_casualty=t_first, found=found, total_casualties=len(cas),
                 false_pins=false_pins, possible=possible, heat_breaches=breaches,
-                scanned_pct=round(100 * b.grid.scanned.sum() / max(1, (b.grid.occ == 0).sum()), 1),
+                scanned_pct=round(100 * (b.grid.scanned & (b.grid.occ == 0)).sum() / max(1, (b.grid.occ == 0).sum()), 1),
                 loop_ms_p50=round(float(np.percentile(lat, 50)), 1), loop_ms_p95=round(float(np.percentile(lat, 95)), 1),
                 baseline_t=(lambda bt: None if bt is None else round(bt, 1))(baseline_time(L)),
                 never_clear=not any('clear' in str(c).lower() for c in b.cards))

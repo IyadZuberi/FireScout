@@ -152,7 +152,7 @@ def log_dashboard(b: B.Brain, o: sensors.Observation, lat: deque, last_card: int
         f'**Mode:** `{b.mode}`  ·  **Radio:** {"🟢 linked" if o.comms else "🔴 LOST (logging offline, " + str(len(b.outbox)) + " queued)"}\n\n'
         f'**Self-temp:** {o.self_temp_c:.0f} °C / 60 limit  ·  **Battery:** {o.battery:.0%}  ·  **CO:** {o.gas_ppm:.0f} ppm\n\n'
         f'**Brain loop:** p50 {p50:.1f} ms · p95 {p95:.1f} ms (budget 50 ms, on-device)  ·  **Scanned:** '
-        f'{100 * g.scanned.sum() / max(1, (g.occ == 0).sum()):.0f}%\n\n{extra_status}',
+        f'{100 * (g.scanned & (g.occ == 0)).sum() / max(1, (g.occ == 0).sum()):.0f}%\n\n{extra_status}',
         media_type=rr.MediaType.MARKDOWN))
     return len(b.cards)
 

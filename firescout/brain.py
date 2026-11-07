@@ -198,6 +198,10 @@ def detect_blobs(thermal, depth, pose, hfov_deg: float = HFOV_DEG) -> list[Blob]
         temps = thermal[mask]
         peak = float(temps.max())
         kind = 'fire' if peak > FIRE_C else 'warm'
+        if kind == 'warm':  # a body is a compact warm object, not a smooth heat gradient on a wall
+            ring = (cv2.dilate(mask.astype(np.uint8), np.ones((9, 9), np.uint8)) > 0) & ~mask
+            if ring.any() and float(np.median(temps)) - float(np.median(thermal[ring])) < 4.0:
+                continue
         if kind == 'fire':
             # range only from the hot core (blur halo spills onto nearer door frames); flames are translucent,
             # so take the near side of the core; ignore fires beyond radar range
@@ -212,6 +216,8 @@ def detect_blobs(thermal, depth, pose, hfov_deg: float = HFOV_DEG) -> list[Blob]
         else:
             r = float(np.median(dvals))
         bearing = yaw + math.atan((cx - cent[k][0]) / fx)
+        if kind == 'warm' and (r * h / fx > 1.0 or r * w / fx > 2.5):
+            continue  # wall-sized warm patch, not a collapsed person
         out.append(Blob(kind, (x + r * math.cos(bearing), y + r * math.sin(bearing)),
                         peak if kind == 'fire' else float(np.median(temps)),
                         r * w / fx, r * h / fx, (u, v, w, h)))
@@ -233,6 +239,24 @@ class Track:
     ic: bool | None = None
     first_seen: float = 0.0
     breath_n: int = 0
+
+
+CAM_H, CAM_FWD = 0.33, 0.15  # thermal camera mount on the robot
+
+
+def project_pixels(depth, pose, step: int = 4, hfov_deg: float = HFOV_DEG):
+    """Sampled pixels -> world points (x, y, z) using the depth/radar range; returns points + pixel indices."""
+    H, W = depth.shape
+    fx = (W / 2) / math.tan(math.radians(hfov_deg) / 2)
+    v, u = np.mgrid[step // 2:H:step, step // 2:W:step]
+    dp = depth[v, u]
+    ok = np.isfinite(dp) & (dp > 0.05) & (dp < 6.0)
+    v, u, dp = v[ok], u[ok], dp[ok]
+    left, up = (W / 2 - u) / fx * dp, (H / 2 - v) / fx * dp
+    x, y, yaw = pose
+    c, s = math.cos(yaw), math.sin(yaw)
+    cx, cy = x + CAM_FWD * c, y + CAM_FWD * s
+    return cx + dp * c - left * s, cy + dp * s + left * c, CAM_H + up, (v, u), dp
 
 
 def in_view(pose, xy, hfov_deg: float = HFOV_DEG, rng: float = VIEW_RANGE) -> bool:
@@ -328,6 +352,7 @@ REJECT_CONF = 0.2
 BREATH_OK = 0.5
 BREATH_RANGE = 2.5
 BREATH_SAMPLES = 20  # ~1 s of radar micro-motion before deciding
+VERIFY_TIMEOUT = 15.0
 SELF_TEMP_LIMIT = 60.0
 SPEED = 0.4
 SLOW_SPEED = 0.2
@@ -415,6 +440,7 @@ class Brain:
         self._verify_fail: dict[int, float] = {}
         self._dist = None
         self._parent = None
+        self._verify_t0 = 0.0
         self.last_blobs: list[Blob] = []
         ys, xs = np.mgrid[0:self.grid.rows, 0:self.grid.cols]
         self._cx, self._cy = (xs + 0.5) * RES, (ys + 0.5) * RES
@@ -477,9 +503,15 @@ class Brain:
                 self._paint_heat(b.xy, b.temp_c)
         near = (self._cx - x) ** 2 + (self._cy - y) ** 2 <= 0.5 ** 2
         g.gas[near] = np.maximum(g.gas[near], obs.gas_ppm)
-        d = np.hypot(self._cx - x, self._cy - y)
-        ang = np.abs(_wrap(np.arctan2(self._cy - y, self._cx - x) - yaw))
-        g.scanned |= (d <= VIEW_RANGE) & (ang <= math.radians(HFOV_DEG) / 2) & (g.occ == 0)
+        # measured heatmap + occlusion-aware coverage from the thermal pixels themselves
+        px, py, pz, (pv, pu), pd = project_pixels(obs.depth, obs.pose)
+        inside = (px >= 0) & (py >= 0) & (px < g.width) & (py < g.height)
+        ci, cj = (py[inside] / RES).astype(int), (px[inside] / RES).astype(int)
+        temps = obs.thermal[pv[inside], pu[inside]]
+        low = pz[inside] < 1.6
+        np.maximum.at(g.heat, (ci[low], cj[low]), temps[low].astype(np.float32))
+        seen = (pz[inside] < 0.6) & (pd[inside] <= VIEW_RANGE)
+        g.scanned[ci[seen], cj[seen]] = True
         t1 = time.perf_counter()
 
         # ---- perception -> tracks
@@ -516,6 +548,7 @@ class Brain:
                     and self.mode != 'RETREAT' and tr.state == 'candidate'                     and self.t - self._verify_fail.get(tr.id, -99.0) >= 10.0:
                 tr.state = 'verify'
                 self.verify_id = tr.id
+                self._verify_t0 = self.t
                 self.mode = 'VERIFY'
                 self.emit('VERIFY', 'thermal', f'track#{tr.id} {np.median(tr.temps):.0f}°C conf {tr.conf:.2f}',
                           'second look + radar breath check', 'uncertain->verify')
@@ -599,6 +632,12 @@ class Brain:
         vt = self.track(self.verify_id) if self.verify_id else None
         if vt is not None and vt.state in ('pinned', 'rejected'):
             self.verify_id, vt = None, None
+        if vt is not None and self.t - self._verify_t0 > VERIFY_TIMEOUT and vt.breath_n < BREATH_SAMPLES:
+            self.emit('POSSIBLE', 'thermal', f'track#{vt.id} conf {vt.conf:.2f}, no clear radar line of sight '
+                      f'in {VERIFY_TIMEOUT:.0f}s', 'kept as POSSIBLE casualty, exploring on', 'verify-timeout')
+            vt.state = 'candidate'
+            self._verify_fail[vt.id] = self.t
+            self.verify_id, vt = None, None
         if vt is not None:
             self.mode = 'VERIFY'
             if math.dist((x, y), vt.xy) <= BREATH_RANGE and self.grid_los(here, g.to_cell(*vt.xy)):
@@ -644,7 +683,7 @@ class Brain:
             self.mode = 'RETURN_COMMS'
             return self._drive_to(self.last_comms_cell, obs, cost, dist, parent)
         if self.mode != 'HOLD':
-            pct = 100.0 * g.scanned.sum() / max(1, (g.occ == 0).sum())
+            pct = 100.0 * (g.scanned & (g.occ == 0)).sum() / max(1, (g.occ == 0).sum())
             self.emit('HOLD', 'map', f'no reachable unexplored area (scanned {pct:.0f}%)',
                       'holding position, human search still required', 'never-declare-empty')
             self.mode = 'HOLD'

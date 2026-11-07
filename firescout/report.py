@@ -16,7 +16,7 @@ def methane(b: Brain, t: float | None = None) -> str:
     mm, ss = divmod(int(t), 60)
     x, y = g.to_world(*b.start_cell)
     free = max(1, int((g.occ == 0).sum()))
-    pct = 100.0 * g.scanned.sum() / free
+    pct = 100.0 * (g.scanned & (g.occ == 0)).sum() / free
     fires = sorted(b.fires, key=lambda f: -f[2])
     hot_cells = int((g.heat > NO_GO_C).sum())
     gas_max = float(g.gas.max())

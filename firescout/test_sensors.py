@@ -38,7 +38,7 @@ def test_thermal_sees_fire_hotter_than_ambient():
     face(m, d, (6.0, 4.0), 2.0, math.pi)
     o = s.observe()
     assert o.thermal.shape == (120, 160) and o.thermal.dtype == np.float32
-    assert o.thermal.max() > 150 and np.median(o.thermal) < 30
+    assert o.thermal.max() > 150 and np.percentile(o.thermal, 10) < 25  # fire hot, background stays near ambient
     assert o.depth.shape == (120, 160)
 
 

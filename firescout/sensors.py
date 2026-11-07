@@ -12,7 +12,7 @@ import cv2
 import mujoco
 import numpy as np
 
-from scene import Layout
+from scene import SMOKE_GROUP, Layout
 
 AMBIENT_C = 20.0
 WALL_C = 22.0
@@ -62,6 +62,12 @@ class Sensors:
         self.cam = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_CAMERA, 'thermal')
         self.vopt = mujoco.MjvOption()
         self.vopt.flags[mujoco.mjtVisFlag.mjVIS_RANGEFINDER] = 0  # sensor sees the world, not debug rays
+        self.vopt_rgb = mujoco.MjvOption()
+        self.vopt_rgb.flags[mujoco.mjtVisFlag.mjVIS_RANGEFINDER] = 0
+        self.vopt.geomgroup[SMOKE_GROUP] = 0  # long-wave IR sees through smoke; the RGB camera does not
+        fy = (H / 2) / math.tan(math.radians(model.cam_fovy[self.cam]) / 2)
+        u, v = np.meshgrid(np.arange(W) + 0.5, np.arange(H) + 0.5)
+        self._ray_cam = np.stack([(u - W / 2) / fy, -(v - H / 2) / fy, -np.ones_like(u)], -1)  # per-pixel, z=-1
 
     # -- ground-truth helpers (never exported to the brain) --
     def ignite(self, i: int, temp_c: float = 450.0) -> None:
@@ -102,15 +108,30 @@ class Sensors:
         is_geom = seg[:, :, 1] == mujoco.mjtObj.mjOBJ_GEOM
         ids = np.where(is_geom & (ids >= 0), ids, -1)
         thermal = self._geom_temps()[ids]
-        thermal = cv2.GaussianBlur(thermal, (5, 5), 0)
-        thermal = (thermal + self.rng.normal(0, 0.5, thermal.shape)).astype(np.float32)
         r.enable_depth_rendering()
         depth = r.render().astype(np.float32)
         r.disable_depth_rendering()
+        # surfaces that are not people/objects (walls, floor, furniture) take the local heat field
+        surface = np.where(ids >= 0, self.geom_thing[np.clip(ids, 0, None)] < 0, True)
+        pts = self.d.cam_xpos[self.cam] + (self._ray_cam * depth[..., None]) @ self.d.cam_xmat[self.cam].reshape(3, 3).T
+        thermal = np.where(surface, np.maximum(thermal, self._heat_field(pts)), thermal)
+        thermal = cv2.GaussianBlur(thermal.astype(np.float32), (5, 5), 0)
+        thermal = (thermal + self.rng.normal(0, 0.5, thermal.shape)).astype(np.float32)
         return thermal, depth
 
+    def _heat_field(self, pts: np.ndarray) -> np.ndarray:
+        """Surface temperature near fires: radiant/convective falloff + hot gas layer under the ceiling."""
+        field = np.full(pts.shape[:-1], AMBIENT_C, np.float32)
+        for (fx, fy), T in self._fires():
+            dT = T - AMBIENT_C
+            d = np.sqrt((pts[..., 0] - fx) ** 2 + (pts[..., 1] - fy) ** 2 + (pts[..., 2] - 0.5) ** 2)
+            dxy = np.hypot(pts[..., 0] - fx, pts[..., 1] - fy)
+            layer = np.clip((pts[..., 2] - 1.2) / 1.2, 0, 1)
+            field += 0.25 * dT * np.exp(-d / 0.5) + 0.08 * dT * np.exp(-dxy / 2.5) * layer
+        return field
+
     def _rgb(self):
-        self.r.update_scene(self.d, self.cam, scene_option=self.vopt)
+        self.r.update_scene(self.d, self.cam, scene_option=self.vopt_rgb)
         self.r.scene.flags[mujoco.mjtRndFlag.mjRND_FOG] = 1
         return self.r.render().copy()
 
