@@ -12,7 +12,7 @@ import cv2
 import mujoco
 import numpy as np
 
-from scene import SMOKE_GROUP, Layout
+from scene import MESH_GROUP, SMOKE_GROUP, Layout
 
 AMBIENT_C = 20.0
 WALL_C = 22.0
@@ -65,6 +65,10 @@ class Sensors:
         self.vopt_rgb = mujoco.MjvOption()
         self.vopt_rgb.flags[mujoco.mjtVisFlag.mjVIS_RANGEFINDER] = 0
         self.vopt.geomgroup[SMOKE_GROUP] = 0  # long-wave IR sees through smoke; the RGB camera does not
+        self.vopt.geomgroup[3] = 1            # thermal/depth: cheap box colliders instead of detailed meshes
+        self.vopt.geomgroup[MESH_GROUP] = 0
+        self.vopt_rgb.geomgroup[MESH_GROUP] = 1
+        self.ray_groups = np.array([1, 0, 0, 1, 0, 0], np.uint8)  # walls/people/debris + box colliders
         fy = (H / 2) / math.tan(math.radians(model.cam_fovy[self.cam]) / 2)
         u, v = np.meshgrid(np.arange(W) + 0.5, np.arange(H) + 0.5)
         self._ray_cam = np.stack([(u - W / 2) / fy, -(v - H / 2) / fy, -np.ones_like(u)], -1)  # per-pixel, z=-1
@@ -101,6 +105,8 @@ class Sensors:
         r = self.r
         r.update_scene(self.d, self.cam, scene_option=self.vopt)
         r.scene.flags[mujoco.mjtRndFlag.mjRND_REFLECTION] = 0  # no mirror images of fires on the floor
+        r.scene.flags[mujoco.mjtRndFlag.mjRND_SHADOW] = 0
+        r.scene.flags[mujoco.mjtRndFlag.mjRND_SKYBOX] = 0
         r.enable_segmentation_rendering()
         seg = r.render()
         r.disable_segmentation_rendering()
@@ -136,7 +142,15 @@ class Sensors:
         return self.r.render().copy()
 
     def _ranges(self):
-        raw = np.array(self.d.sensordata[:36], dtype=np.float32)
+        """60 GHz radar ring: 36 rays at 10 deg, 0.14 m high, walls/furniture colliders/people (not meshes/smoke)."""
+        x, y = self._robot_xy()
+        a = self._yaw() + np.radians(np.arange(36) * 10.0)
+        vec = np.stack([np.cos(a), np.sin(a), np.zeros(36)], 1).ravel()
+        gid = np.zeros(36, np.int32)
+        dist = np.zeros(36, np.float64)
+        mujoco.mj_multiRay(self.m, self.d, np.array([x, y, 0.14]), vec, self.ray_groups, 1, self.scout_body,
+                           gid, dist, None, 36, MAX_RANGE)
+        raw = dist.astype(np.float32)
         raw = np.where((raw < 0) | (raw > MAX_RANGE), MAX_RANGE, raw)
         noisy = raw + self.rng.normal(0, 0.05, 36)
         return np.clip(noisy, 0.05, MAX_RANGE).astype(np.float32)

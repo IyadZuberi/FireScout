@@ -26,7 +26,7 @@ def test_things_clear_of_start():
 
 def test_mjcf_loads_and_steps():
     m, d = load(generate_layout(1))
-    assert m.nsensor == 36 and m.ncam == 2  # thermal + chase
+    assert m.ncam == 2  # thermal + chase (radar is a batched ray cast in sensors.py)
     for _ in range(10):
         mujoco.mj_step(m, d)
 

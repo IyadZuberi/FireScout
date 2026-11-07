@@ -22,6 +22,7 @@ WALL_T = 0.12
 CORRIDOR = (3.2, 4.8)  # y-span of the central corridor
 DOOR_W = 1.0
 N_SMOKE = 36
+MESH_GROUP = 5   # detailed SimReady meshes: viewer + RGB camera only; thermal/depth use group-3 box colliders
 SMOKE_GROUP = 2  # rendered in the viewer + RGB camera, invisible to the thermal camera (LWIR sees through smoke)
 
 # prop key -> (mesh scale xyz, collider half-size xyz or None, rgb override)
@@ -248,8 +249,8 @@ def _thing_geoms(i: int, t: Thing, rng, meta) -> str:
         _human(add, rng)
     elif t.style == 'radiator':
         if 'radiator' in meta:
-            add(type='mesh', mesh='radiator', material='mradiator', contype='0', conaffinity='0')
-            add(type='box', size=_f(0.04, 0.27, 0.24), pos=_f(0, 0, 0.25), group='3', rgba='0 0 0 0')
+            add(type='mesh', mesh='radiator', material='mradiator', contype='0', conaffinity='0', group=str(MESH_GROUP))
+            add(type='box', size=_f(0.04, 0.27, 0.24), pos=_f(0, 0, 0.25), group='3', rgba='0.9 0.9 0.9 1')
         else:
             for k in range(6):
                 add(type='box', size=_f(0.04, 0.04, 0.24), pos=_f(0, -0.25 + k * 0.1, 0.29), material='metal')
@@ -260,9 +261,12 @@ def _thing_geoms(i: int, t: Thing, rng, meta) -> str:
         add(type='sphere', size='0.07', pos=_f(0.22, 0, 0.16), material='fur')
         add(type='capsule', size=_f(0.02, 0.08), pos=_f(-0.24, 0, 0.1), euler='0 60 0', material='fur')
     elif t.kind == 'shelf':
+        for k, (r, z) in enumerate(((0.3, 1.55), (0.22, 1.9), (0.14, 2.15))):  # hidden until ignited (group 4)
+            add(type='ellipsoid', size=_f(r, r * 0.8, r * 1.5), pos=_f(0.02 * k, 0, z), material=f'flame{k}',
+                contype='0', conaffinity='0', group='4')
         if 'cabinet' in meta:
-            add(type='mesh', mesh='cabinet', material='mcabinet', contype='0', conaffinity='0')
-            add(type='box', size=_f(0.2, 0.41, 0.68), pos=_f(0, 0, 0.68), group='3', rgba='0 0 0 0')
+            add(type='mesh', mesh='cabinet', material='mcabinet', contype='0', conaffinity='0', group=str(MESH_GROUP))
+            add(type='box', size=_f(0.2, 0.41, 0.68), pos=_f(0, 0, 0.68), group='3', rgba='0.6 0.6 0.6 1')
         else:
             add(type='box', size=_f(sx / 2, sy / 2, sz / 2), pos=_f(0, 0, sz / 2), material='wood')
     return '\n      '.join(g)
@@ -274,9 +278,6 @@ def _robot() -> str:
         for k, x in enumerate((-0.17, -0.06, 0.06, 0.17)):
             wheels.append(f'<geom type="cylinder" size="0.045 0.035" pos="{x} {0.165 * s} 0.05" euler="90 0 0" '
                           f'material="wheel" contype="0" conaffinity="0" mass="0.05"/>')
-    sites = '\n      '.join(
-        f'<site name="rf{k}" pos="0 0 0.14" zaxis="{_f(math.cos(math.radians(10 * k)), math.sin(math.radians(10 * k)), 0)}" '
-        f'size="0.01" rgba="0 1 0 0"/>' for k in range(36))
     return f"""<body name="scout" pos="__START__">
       <joint name="x" type="slide" axis="1 0 0" damping="1"/>
       <joint name="y" type="slide" axis="0 1 0" damping="1"/>
@@ -295,7 +296,6 @@ def _robot() -> str:
       <light name="searchlight" type="spot" pos="0.14 0 0.3" dir="1 0 -0.25" diffuse="0.9 0.9 0.8" cutoff="32" exponent="8" castshadow="true"/>
       <camera name="thermal" pos="0.15 0 0.33" xyaxes="0 -1 0 0 0 1" fovy="43.6"/>
       <camera name="chase" mode="trackcom" pos="-0.9 0 2.8" xyaxes="0 -1 0 0.85 0 0.53" fovy="70"/>
-      {sites}
     </body>"""
 
 
@@ -318,9 +318,9 @@ def build_mjcf(layout: Layout) -> str:
             continue
         scale, col = PROP_SPEC[p.key]
         coll = '' if col is None else (f'<geom name="prop{k}_c" type="box" size="{_f(*col)}" pos="0 0 {col[2]:.3g}" '
-                                       f'group="3" rgba="0 0 0 0"/>')
+                                       f'group="3" rgba="0.6 0.6 0.6 1"/>')
         props.append(f'<body name="prop{k}" pos="{_f(p.xy[0], p.xy[1], p.z)}" euler="0 0 {math.degrees(p.yaw):.4g}">'
-                     f'<geom name="prop{k}_v" type="mesh" mesh="{p.key}" material="m{p.key}" contype="0" conaffinity="0"/>'
+                     f'<geom name="prop{k}_v" type="mesh" mesh="{p.key}" material="m{p.key}" contype="0" conaffinity="0" group="{MESH_GROUP}"/>'
                      f'{coll}</body>')
     things = []
     for i, t in enumerate(layout.things):
@@ -344,22 +344,21 @@ def build_mjcf(layout: Layout) -> str:
         f'<mesh name="{k}" file="{k}.obj" scale="{_f(*PROP_SPEC[k][0])}"/>'
         f'<material name="m{k}" rgba="{_f(*v["rgb"])} 1" specular="0.35" shininess="0.4"/>'
         for k, v in meta.items())
-    sensors = '\n    '.join(f'<rangefinder name="rf{k}" site="rf{k}" cutoff="6"/>' for k in range(36))
     sx, sy = layout.start
     return f"""<mujoco model="firescout">
   <compiler meshdir="{ASSET_DIR.replace(os.sep, '/')}"/>
   <option timestep="0.005"/>
   <visual>
-    <quality shadowsize="8192" offsamples="8"/>
+    <quality shadowsize="4096" offsamples="2"/>
     <headlight ambient="0.16 0.16 0.17" diffuse="0.22 0.22 0.22" specular="0 0 0"/>
     <map fogstart="1.5" fogend="9" znear="0.02" haze="0.25"/>
     <rgba fog="0.3 0.3 0.32 1" haze="0.22 0.21 0.22 1"/>
-    <global offwidth="1280" offheight="720"/>
+    <global offwidth="640" offheight="480"/>
   </visual>
   <asset>
     <texture type="skybox" builtin="gradient" rgb1="0.28 0.26 0.25" rgb2="0.05 0.05 0.06" width="512" height="512"/>
     <texture name="vinyl" type="2d" builtin="checker" rgb1="0.46 0.47 0.45" rgb2="0.42 0.43 0.41" width="512" height="512" mark="edge" markrgb="0.36 0.37 0.36"/>
-    <material name="floor" texture="vinyl" texrepeat="20 13" reflectance="0.12" specular="0.3"/>
+    <material name="floor" texture="vinyl" texrepeat="20 13" specular="0.3" shininess="0.3"/>
     <material name="plaster" rgba="0.83 0.81 0.76 1" specular="0.05" shininess="0.1"/>
     <material name="skirting" rgba="0.42 0.4 0.37 1"/>
     <material name="char" rgba="0.08 0.06 0.05 1"/>
@@ -391,7 +390,7 @@ def build_mjcf(layout: Layout) -> str:
   </asset>
   <worldbody>
     <light name="ceil0" type="spot" pos="{_f(W * 0.3, H / 2, 6)}" dir="0 0 -1" diffuse="0.38 0.38 0.4" cutoff="75" castshadow="true"/>
-    <light name="ceil1" type="spot" pos="{_f(W * 0.75, H / 2, 6)}" dir="0 0 -1" diffuse="0.38 0.38 0.4" cutoff="75" castshadow="true"/>
+    <light name="ceil1" type="spot" pos="{_f(W * 0.75, H / 2, 6)}" dir="0 0 -1" diffuse="0.38 0.38 0.4" cutoff="75" castshadow="false"/>
     <geom name="floor" type="plane" size="{_f(W / 2 + 1, H / 2 + 1, 0.1)}" pos="{_f(W / 2, H / 2, 0)}" material="floor"/>
     {chr(10).join('    ' + w for w in walls).strip()}
     {_robot().replace('__START__', _f(sx, sy, 0.0))}
@@ -404,9 +403,6 @@ def build_mjcf(layout: Layout) -> str:
     <velocity name="ay" joint="y" kv="50" ctrlrange="-1 1"/>
     <velocity name="ayaw" joint="yaw" kv="10" ctrlrange="-1.5 1.5"/>
   </actuator>
-  <sensor>
-    {sensors}
-  </sensor>
 </mujoco>"""
 
 
