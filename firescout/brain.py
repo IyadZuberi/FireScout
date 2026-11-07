@@ -81,8 +81,9 @@ def cost_map(grid: Grid, no_go_c: float = NO_GO_C) -> np.ndarray:
     heat_eff = np.maximum(grid.heat, cv2.GaussianBlur(grid.heat, (0, 0), 0.5 / grid.res))
     cost = 1.0 + np.maximum(0.0, (heat_eff - 40.0) / 50.0) + grid.gas / 500.0
     cost = np.where(grid.occ == -1, 1.5 + cost - 1.0, cost)
-    walls = cv2.dilate((grid.occ == 1).astype(np.uint8), np.ones((3, 3), np.uint8)) > 0
-    cost[walls | (heat_eff > no_go_c)] = np.inf
+    near_wall = cv2.dilate((grid.occ == 1).astype(np.uint8), np.ones((3, 3), np.uint8)) > 0
+    cost[near_wall] += 6.0  # keep clear of walls (robot radius) but never trap the robot
+    cost[(grid.occ == 1) | (heat_eff > no_go_c)] = np.inf
     return cost.astype(np.float32)
 
 
@@ -219,6 +220,7 @@ class Track:
     state: Literal['candidate', 'verify', 'pinned', 'rejected'] = 'candidate'
     ic: bool | None = None
     first_seen: float = 0.0
+    breath_n: int = 0
 
 
 def in_view(pose, xy, hfov_deg: float = HFOV_DEG, rng: float = VIEW_RANGE) -> bool:
@@ -231,7 +233,7 @@ def in_view(pose, xy, hfov_deg: float = HFOV_DEG, rng: float = VIEW_RANGE) -> bo
 
 
 class Tracker:
-    def __init__(self, gate_m: float = 0.75):
+    def __init__(self, gate_m: float = 1.2):
         self.tracks: list[Track] = []
         self.gate = gate_m
         self._next = 1
@@ -258,6 +260,16 @@ class Tracker:
         for tr in self.tracks:
             if tr.id not in matched and in_view(pose, tr.xy):
                 tr.hits.append(False)
+        keep = []
+        for tr in self.tracks:  # merge duplicates of one body seen from different angles
+            dup = next((k for k in keep if k.kind == tr.kind and math.dist(k.xy, tr.xy) < self.gate), None)
+            if dup is None:
+                keep.append(tr)
+            else:
+                dup.width_m, dup.height_m = max(dup.width_m, tr.width_m), max(dup.height_m, tr.height_m)
+                if tr.state == 'pinned' or (tr.breath or 0) > (dup.breath or 0):
+                    dup.state, dup.breath, dup.conf = tr.state, tr.breath, tr.conf
+        self.tracks = keep
         return self.tracks
 
 
@@ -293,3 +305,385 @@ class Calibrator:
         self.w += self.lr * ((1.0 if label else 0.0) - _sigmoid(float(self.w @ f))) * f
         with open(self.path, 'a', encoding='utf-8') as fh:
             fh.write(json.dumps({'features': f.round(4).tolist(), 'label': bool(label), 'track': tr.id}) + '\n')
+
+
+# ================================================================== brain
+import time
+
+PIN_CONF = 0.8
+VERIFY_CONF = 0.4
+REJECT_CONF = 0.2
+BREATH_OK = 0.5
+BREATH_RANGE = 2.5
+BREATH_SAMPLES = 20  # ~1 s of radar micro-motion before deciding
+SELF_TEMP_LIMIT = 60.0
+SPEED = 0.4
+SLOW_SPEED = 0.2
+
+
+@dataclass
+class Card:
+    t: float
+    kind: Literal['REPLAN', 'VERIFY', 'PIN', 'REJECT', 'POSSIBLE', 'RETREAT', 'COMMS', 'LEARN', 'HOLD']
+    trigger: str
+    detail: str
+    change: str
+    rule: str
+
+    def __str__(self) -> str:
+        mm, ss = divmod(int(self.t), 60)
+        return f'[{mm:02d}:{ss:02d}] {self.kind} trigger={self.trigger} {self.detail} | {self.change} | rule={self.rule}'
+
+
+@dataclass
+class Command:
+    vx: float
+    vy: float
+    wz: float
+    want_breath_xy: tuple[float, float] | None = None
+
+
+def dijkstra(cost: np.ndarray, start):
+    """Distances + parents from start over the cost map (8-connected)."""
+    rows, cols = cost.shape
+    dist = np.full(cost.shape, np.inf)
+    parent = {}
+    dist[start] = 0.0
+    pq = [(0.0, start)]
+    while pq:
+        dc, cur = heapq.heappop(pq)
+        if dc > dist[cur]:
+            continue
+        for di, dj, step in _NB:
+            n = (cur[0] + di, cur[1] + dj)
+            if not (0 <= n[0] < rows and 0 <= n[1] < cols) or not np.isfinite(cost[n]):
+                continue
+            if di and dj and not (np.isfinite(cost[cur[0] + di, cur[1]]) and np.isfinite(cost[cur[0], cur[1] + dj])):
+                continue
+            nd = dc + step * float(cost[n])
+            if nd < dist[n]:
+                dist[n], parent[n] = nd, cur
+                heapq.heappush(pq, (nd, n))
+    return dist, parent
+
+
+def unwind(parent, goal):
+    path = [goal]
+    while path[-1] in parent:
+        path.append(parent[path[-1]])
+    return path[::-1]
+
+
+def _wrap(a):
+    return (a + math.pi) % (2 * math.pi) - math.pi
+
+
+class Brain:
+    def __init__(self, width: float, height: float, start_xy, feedback_path: str = 'feedback.jsonl'):
+        self.grid = Grid(width, height)
+        self.tracker = Tracker()
+        self.cal = Calibrator(feedback_path)
+        self.start_cell = self.grid.to_cell(*start_xy)
+        self.mode = 'EXPLORE'
+        self.path: list = []
+        self.goal = None
+        self.verify_id: int | None = None
+        self.rescue = None
+        self.exit_path = None
+        self.cards: list[Card] = []
+        self.outbox: list[Card] = []
+        self.last_comms_cell = self.start_cell
+        self.timings: dict[str, float] = {}
+        self.fires: list[tuple[float, float, float]] = []
+        self.t = 0.0
+        self._comms = True
+        self._ticks = 0
+        self._last_replan: dict[str, float] = {}
+        self._no_target = 0
+        self._verify_fail: dict[int, float] = {}
+        self._dist = None
+        self._parent = None
+        ys, xs = np.mgrid[0:self.grid.rows, 0:self.grid.cols]
+        self._cx, self._cy = (xs + 0.5) * RES, (ys + 0.5) * RES
+
+    # ------------------------------------------------------------ helpers
+    def emit(self, kind, trigger, detail, change, rule):
+        c = Card(self.t, kind, trigger, detail, change, rule)
+        self.cards.append(c)
+        if not self._comms:
+            self.outbox.append(c)
+        return c
+
+    def cell_name(self, c):
+        x, y = self.grid.to_world(*c)
+        return f'({x:.1f},{y:.1f})'
+
+    def track(self, tid):
+        return next((t for t in self.tracker.tracks if t.id == tid), None)
+
+    def feedback(self, track_id: int, is_person: bool) -> None:
+        tr = self.track(track_id)
+        if tr is None:
+            return
+        before = self.cal.conf(tr)
+        self.cal.update(tr, is_person)
+        tr.ic = is_person
+        tr.conf = self.cal.conf(tr)
+        if not is_person:
+            tr.state = 'rejected'
+        self.emit('LEARN', 'IC', f'track#{tr.id} marked {"PERSON" if is_person else "NOT PERSON"}',
+                  f'similar conf {before:.2f}->{tr.conf:.2f}', 'ic-feedback')
+
+    # ------------------------------------------------------------ main loop
+    def step(self, obs) -> Command:
+        t0 = time.perf_counter()
+        self.t = obs.t
+        self._ticks += 1
+        g = self.grid
+        x, y, yaw = obs.pose
+        here = g.to_cell(x, y)
+
+        # ---- comms bookkeeping
+        if obs.comms:
+            if not self._comms:
+                self.outbox.clear()  # back in range: queued findings uploaded
+            self._comms = True
+            self.last_comms_cell = here
+        elif self._comms:
+            self._comms = False
+            self.emit('COMMS', 'radio', 'link lost', f'continuing {self.mode}, logging offline',
+                      'comms-loss-continue')
+
+        # ---- map
+        integrate_ranges(g, obs.pose, obs.ranges)
+        g.occ[here] = 0
+        blobs = detect_blobs(obs.thermal, obs.depth, obs.pose)
+        for b in blobs:
+            if b.kind == 'fire':
+                self._paint_heat(b.xy, b.temp_c)
+        near = (self._cx - x) ** 2 + (self._cy - y) ** 2 <= 0.5 ** 2
+        g.gas[near] = np.maximum(g.gas[near], obs.gas_ppm)
+        d = np.hypot(self._cx - x, self._cy - y)
+        ang = np.abs(_wrap(np.arctan2(self._cy - y, self._cx - x) - yaw))
+        g.scanned |= (d <= VIEW_RANGE) & (ang <= math.radians(HFOV_DEG) / 2) & (g.occ == 0)
+        t1 = time.perf_counter()
+
+        # ---- perception -> tracks
+        self.tracker.update([b for b in blobs if b.kind == 'warm'], obs.t, obs.pose)
+        vt = self.track(self.verify_id) if self.verify_id else None
+        if vt is not None and obs.breath is not None:
+            vt.breath_n += 1
+            vt.breath = (vt.breath or 0.0) + (obs.breath - (vt.breath or 0.0)) / vt.breath_n
+        for tr in self.tracker.tracks:
+            if tr.kind != 'warm' or tr.state in ('pinned', 'rejected') or tr.ic is not None:
+                continue
+            tr.conf = self.cal.conf(tr)
+            if len(tr.hits) >= 5 and tr.conf < REJECT_CONF:
+                tr.state = 'rejected'
+                if self.verify_id == tr.id:
+                    self.verify_id, self.mode = None, 'EXPLORE'
+                self.emit('REJECT', 'thermal', f'track#{tr.id} {np.median(tr.temps):.0f}°C '
+                          f'{tr.width_m:.1f}x{tr.height_m:.1f}m conf {tr.conf:.2f}', 'ignored', 'not-body-like')
+            elif tr.breath is not None and tr.breath_n >= BREATH_SAMPLES:
+                if self.verify_id == tr.id or tr.state != 'verify':
+                    if tr.conf >= PIN_CONF and tr.breath >= BREATH_OK:
+                        tr.state = 'pinned'
+                        self.emit('PIN', 'thermal+radar', f'casualty#{tr.id} at ({tr.xy[0]:.1f},{tr.xy[1]:.1f}) '
+                                  f'conf {tr.conf:.2f} breathing {tr.breath:.2f}', 'added to rescue route',
+                                  'two-sensor-confirm')
+                    else:
+                        tr.state = 'verify'
+                        self.emit('POSSIBLE', 'radar', f'track#{tr.id} conf {tr.conf:.2f} breathing {tr.breath:.2f}',
+                                  'kept as POSSIBLE casualty for crew', 'never-drop-candidate')
+                    if self.verify_id == tr.id:
+                        self.verify_id = None
+                        self.mode = 'EXPLORE'
+            elif len(tr.hits) >= 3 and tr.conf >= VERIFY_CONF and self.verify_id is None \
+                    and self.mode != 'RETREAT' and tr.state == 'candidate'                     and self.t - self._verify_fail.get(tr.id, -99.0) >= 10.0:
+                tr.state = 'verify'
+                self.verify_id = tr.id
+                self.mode = 'VERIFY'
+                self.emit('VERIFY', 'thermal', f'track#{tr.id} {np.median(tr.temps):.0f}°C conf {tr.conf:.2f}',
+                          'second look + radar breath check', 'uncertain->verify')
+        t2 = time.perf_counter()
+
+        # ---- safety gate + planning
+        cost = cost_map(g)
+        blocked = any(not np.isfinite(cost[c]) for c in self.path)
+        if self._dist is None or blocked or self._ticks % 5 == 1:  # 4 Hz global plan, instant on block
+            self._dist, self._parent = dijkstra(cost, here)
+        dist, parent = self._dist, self._parent
+        cmd = self._plan(obs, cost, dist, parent, here)
+        if self._ticks % 10 == 1 and dist is not None:
+            self.exit_path = unwind(parent, self.start_cell) if np.isfinite(dist[self.start_cell]) else None
+            pins = [g.to_cell(*t.xy) for t in self.tracker.tracks if t.state == 'pinned'][:4]
+            pins = [self._near(self.tracker_xy(p), dist) or p for p in pins]
+            pins = [p for p in pins if np.isfinite(dist[p])]
+            self.rescue = rescue_route(cost, here, pins) if pins else None
+        t3 = time.perf_counter()
+        self.timings = {'map': (t1 - t0) * 1e3, 'perceive': (t2 - t1) * 1e3, 'plan': (t3 - t2) * 1e3,
+                        'total': (t3 - t0) * 1e3}
+        return cmd
+
+    def tracker_xy(self, cell):
+        return self.grid.to_world(*cell)
+
+    def _paint_heat(self, xy, temp):
+        m = (self._cx - xy[0]) ** 2 + (self._cy - xy[1]) ** 2 <= 0.35 ** 2
+        self.grid.heat[m] = np.maximum(self.grid.heat[m], temp)
+        for k, (fx, fy, ft) in enumerate(self.fires):
+            if math.dist((fx, fy), xy) < 0.6:
+                self.fires[k] = (fx, fy, max(ft, temp))
+                return
+        self.fires.append((xy[0], xy[1], temp))
+
+    def _goto(self, goal, parent, cost):
+        """Set self.path toward goal; emit REPLAN (with the sensor reason) if the old route got blocked."""
+        old = self.path
+        new = unwind(parent, goal)
+        if old and self.goal == goal and len(old) > 2:
+            blocked = next((c for c in old if not np.isfinite(cost[c])), None)
+            if blocked is not None:
+                g = self.grid
+                hot = float(np.max(g.heat[max(0, blocked[0] - 2):blocked[0] + 3,
+                                          max(0, blocked[1] - 2):blocked[1] + 3]))
+                if hot > NO_GO_C:
+                    trig, det, rule = 'thermal', f'{self.cell_name(blocked)}={hot:.0f}°C>{NO_GO_C:.0f}', 'heat-no-go'
+                else:
+                    trig, det, rule = 'radar', f'obstacle at {self.cell_name(blocked)}', 'obstacle'
+                big = trig == 'thermal' or abs(len(new) - len(old)) * RES >= 1.0
+                if big and self.t - self._last_replan.get(trig, -99.0) >= 2.0:
+                    self._last_replan[trig] = self.t
+                    self.emit('REPLAN', trig, det, f'old {len(old) * RES:.1f}m->new {len(new) * RES:.1f}m '
+                              f'({(len(new) - len(old)) * RES / SPEED:+.0f}s)', rule)
+        self.goal, self.path = goal, new
+
+    def _plan(self, obs, cost, dist, parent, here) -> Command:
+        g = self.grid
+        x, y, yaw = obs.pose
+        heat_here = float(g.heat[here])
+        hot_here = max(heat_here, float(cv2.GaussianBlur(g.heat, (0, 0), 0.5 / RES)[here])) > NO_GO_C
+
+        # 1. self-protection (safety gate, fixed rules)
+        if obs.self_temp_c >= SELF_TEMP_LIMIT or hot_here or obs.battery < 0.15:
+            if self.mode != 'RETREAT':
+                rule = 'low-battery' if obs.battery < 0.15 else 'heat-limit'
+                self.emit('RETREAT', 'self-temp' if obs.self_temp_c >= SELF_TEMP_LIMIT else 'thermal',
+                          f'self {obs.self_temp_c:.0f}°C cell {heat_here:.0f}°C battery {obs.battery:.0%}',
+                          'retreating to coolest known area', rule)
+                self.mode = 'RETREAT'
+                self.verify_id = None
+            target = self.start_cell if obs.battery < 0.15 else self._coolest(here)
+            return self._drive_to(target, obs, cost, dist, parent)
+        if self.mode == 'RETREAT':
+            if obs.self_temp_c < SELF_TEMP_LIMIT - 10:
+                self.mode = 'EXPLORE'
+            else:
+                return self._drive_to(self._coolest(here), obs, cost, dist, parent)
+
+        # 2. verify uncertain casualty (second look + radar breath check)
+        vt = self.track(self.verify_id) if self.verify_id else None
+        if vt is not None and vt.state in ('pinned', 'rejected'):
+            self.verify_id, vt = None, None
+        if vt is not None:
+            self.mode = 'VERIFY'
+            if math.dist((x, y), vt.xy) <= BREATH_RANGE and self.grid_los(here, g.to_cell(*vt.xy)):
+                face = math.atan2(vt.xy[1] - y, vt.xy[0] - x)
+                return Command(0.0, 0.0, float(np.clip(2.0 * _wrap(face - yaw), -1.5, 1.5)), vt.xy)
+            target = self._near(vt.xy, dist)
+            if target is not None:
+                return self._drive_to(target, obs, cost, dist, parent)
+            vt.state = 'candidate'  # unreachable for now: retry later, never dropped
+            self._verify_fail[vt.id] = self.t
+            self.verify_id = None
+            self.mode = 'EXPLORE'
+
+        # 3. explore nearest reachable frontier (commit to goal while it stays a frontier)
+        if dist is not None:
+            # goals: radar frontiers + free cells the thermal camera has not looked at yet
+            unk = g.occ == -1
+            fmask = np.zeros_like(unk)
+            fmask[1:, :] |= unk[:-1, :]
+            fmask[:-1, :] |= unk[1:, :]
+            fmask[:, 1:] |= unk[:, :-1]
+            fmask[:, :-1] |= unk[:, 1:]
+            goal_mask = (g.occ == 0) & (fmask | ~g.scanned) & (cost < 6.0) & np.isfinite(dist)                 & (np.hypot(self._cx - x, self._cy - y) > 0.6)
+            if self.goal is not None and goal_mask[self.goal]:
+                target = self.goal
+            elif goal_mask.any():
+                target = tuple(int(v) for v in np.unravel_index(np.argmin(np.where(goal_mask, dist, np.inf)),
+                                                                 dist.shape))
+            else:
+                target = None
+            if target is not None:
+                self._no_target = 0
+                self.mode = 'EXPLORE'
+                return self._drive_to(target, obs, cost, dist, parent)
+        self._no_target += 1
+        if self._no_target < 20 and self.mode != 'HOLD':  # 1 s grace: frontiers flicker with sensor noise
+            return Command(0.0, 0.0, 0.6)  # turn in place to look around
+        if not obs.comms and here != self.last_comms_cell and dist is not None \
+                and np.isfinite(dist[self.last_comms_cell]):
+            if self.mode != 'RETURN_COMMS':
+                self.emit('COMMS', 'radio', 'exploration done offline', 'returning to last radio contact',
+                          'upload-findings')
+            self.mode = 'RETURN_COMMS'
+            return self._drive_to(self.last_comms_cell, obs, cost, dist, parent)
+        if self.mode != 'HOLD':
+            pct = 100.0 * g.scanned.sum() / max(1, (g.occ == 0).sum())
+            self.emit('HOLD', 'map', f'no reachable unexplored area (scanned {pct:.0f}%)',
+                      'holding position, human search still required', 'never-declare-empty')
+            self.mode = 'HOLD'
+        self.path = []
+        return Command(0.0, 0.0, 0.0)
+
+    def _coolest(self, here):
+        g = self.grid
+        d = np.hypot(self._cx - self._cx[here], self._cy - self._cy[here])
+        heat = np.maximum(g.heat, cv2.GaussianBlur(g.heat, (0, 0), 0.5 / RES))
+        cand = np.where((g.occ == 0) & (d <= 6.0), heat + 0.5 * d, np.inf)
+        return tuple(int(v) for v in np.unravel_index(np.argmin(cand), cand.shape))
+
+    def grid_los(self, a, b) -> bool:
+        """No known wall cell between a and b on the robot's own map."""
+        return all(self.grid.occ[c] != 1 for c in _line(a, b)[1:-1] if self.grid.inside(*c))
+
+    def _near(self, xy, dist):
+        """Reachable free cell 1-2 m from xy with line of sight to it (for a second look)."""
+        if dist is None:
+            return None
+        d = np.hypot(self._cx - xy[0], self._cy - xy[1])
+        cand = np.where((d >= 1.0) & (d <= 2.0) & np.isfinite(dist), dist, np.inf)
+        tgt = self.grid.to_cell(*xy)
+        order = np.argsort(cand, axis=None)[:80]
+        for flat in order:
+            c = tuple(int(v) for v in np.unravel_index(flat, cand.shape))
+            if not np.isfinite(cand[c]):
+                return None
+            if self.grid_los(c, tgt):
+                return c
+        return None
+
+    def _drive_to(self, target, obs, cost, dist, parent) -> Command:
+        x, y, yaw = obs.pose
+        if dist is None or target is None or not np.isfinite(dist[target]):
+            # standing in a no-go cell: back away down the heat gradient
+            gy, gx = np.gradient(cv2.GaussianBlur(self.grid.heat, (0, 0), 2))
+            i, j = self.grid.to_cell(x, y)
+            v = -np.array([gx[i, j], gy[i, j]])
+            n = np.linalg.norm(v)
+            v = v / n * SPEED if n > 1e-6 else np.array([-SPEED, 0.0])
+            return Command(float(v[0]), float(v[1]), 0.0)
+        self._goto(target, parent, cost)
+        pts = [self.grid.to_world(*c) for c in self.path]
+        k0 = min(range(len(pts)), key=lambda k: math.dist(pts[k], (x, y)))
+        look = next((p for p in pts[k0:] if math.dist(p, (x, y)) >= 0.5), pts[-1])
+        dx, dy = look[0] - x, look[1] - y
+        dn = math.hypot(dx, dy)
+        if dn < 1e-3:
+            return Command(0.0, 0.0, 0.0)
+        speed = SLOW_SPEED if any(t.state == 'pinned' and math.dist(t.xy, (x, y)) < 1.5
+                                  for t in self.tracker.tracks) else SPEED
+        turn = _wrap(math.atan2(dy, dx) - yaw)
+        k = max(0.0, math.cos(turn))  # slow while turning so the thermal camera looks where it goes
+        return Command(dx / dn * speed * k, dy / dn * speed * k, float(np.clip(2.5 * turn, -1.5, 1.5)))

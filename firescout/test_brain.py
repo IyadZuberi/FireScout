@@ -117,3 +117,92 @@ def test_tracker_associates_and_counts_misses():
     assert list(tracks[0].hits) == [True, True, False]
     tracks = tr.update([], 0.15, (0, 0, math.pi))  # looking away -> no miss recorded
     assert len(tracks[0].hits) == 3
+
+
+# ---------------- Task 5: brain loop
+from brain import Brain, Card
+from sensors import Observation
+
+
+def obs(**kw):
+    base = dict(t=0.0, pose=(0.6, 4.0, 0.0), thermal=np.full((120, 160), 20, np.float32),
+                depth=np.full((120, 160), 5.0, np.float32), ranges=np.full(36, 6.0, np.float32),
+                gas_ppm=0.0, comms=True, self_temp_c=25.0, battery=1.0)
+    base.update(kw)
+    return Observation(**base)
+
+
+def person_frame():
+    th = np.full((120, 160), 20, np.float32)
+    th[60:66, 20:140] = 36  # wide, low warm blob straight ahead
+    return th, np.full((120, 160), 2.0, np.float32)
+
+
+def test_card_format():
+    c = Card(34.0, 'REPLAN', 'thermal', 'C2=310°C(.92)>250', 'old 6.1m→new 10.3m (+10s)', 'heat-no-go')
+    assert str(c).startswith('[00:34] REPLAN trigger=thermal C2=310')
+    assert str(c).endswith('| rule=heat-no-go')
+
+
+def test_retreat_when_self_hot():
+    b = Brain(12, 8, (0.6, 4.0))
+    b.step(obs(self_temp_c=65))
+    assert b.mode == 'RETREAT' and b.cards[-1].kind == 'RETREAT'
+
+
+def test_retreat_when_fire_dragged_onto_robot():
+    b = Brain(12, 8, (2.0, 4.0))
+    b.step(obs(pose=(2.0, 4.0, 0.0)))
+    i, j = b.grid.to_cell(2.0, 4.0)
+    b.grid.heat[i - 1:i + 2, j - 1:j + 2] = 600
+    b.step(obs(t=0.05, pose=(2.0, 4.0, 0.0)))
+    assert b.mode == 'RETREAT'
+
+
+def test_hold_not_crash_when_all_blocked():
+    b = Brain(4, 4, (0.5, 0.5))
+    b.grid.occ[:] = 0
+    b.grid.heat[8:, :] = 600  # cool pocket rows 0-7 (y<2 m), rest no-go, no frontiers
+    b.grid.scanned[:] = True  # already looked at everything reachable
+    for k in range(21):  # 1 s grace before HOLD
+        cmd = b.step(obs(t=k * 0.05, pose=(0.5, 0.5, 0)))
+    assert b.mode == 'HOLD' and b.cards[-1].kind == 'HOLD'
+    assert abs(cmd.vx) < 1e-6 and abs(cmd.vy) < 1e-6
+
+
+def test_no_card_says_clear():
+    b = Brain(12, 8, (0.6, 4.0))
+    for k in range(50):
+        b.step(obs(t=k * 0.05))
+    assert not any('clear' in str(c).lower() for c in b.cards)
+
+
+def test_comms_loss_queues_and_continues():
+    b = Brain(12, 8, (0.6, 4.0))
+    cmd = b.step(obs(comms=False))
+    assert b.mode == 'EXPLORE' and b.outbox and b.cards[-1].kind == 'COMMS'
+    assert abs(cmd.vx) + abs(cmd.vy) > 0
+
+
+def test_verify_requests_breath_then_pins():
+    b = Brain(12, 8, (2.0, 4.0))
+    th, dp = person_frame()
+    cmd = None
+    for k in range(4):
+        cmd = b.step(obs(t=k * 0.05, pose=(2.0, 4.0, 0.0), thermal=th, depth=dp))
+    assert b.mode == 'VERIFY' and cmd.want_breath_xy is not None
+    for k in range(20):  # ~1 s of radar breathing samples
+        b.step(obs(t=0.25 + k * 0.05, pose=(2.0, 4.0, 0.0), thermal=th, depth=dp, breath=0.9))
+    assert any(c.kind == 'PIN' for c in b.cards)
+    assert any(tr.state == 'pinned' for tr in b.tracker.tracks)
+
+
+def test_no_breath_keeps_possible_not_dropped():
+    b = Brain(12, 8, (2.0, 4.0))
+    th, dp = person_frame()
+    for k in range(4):
+        b.step(obs(t=k * 0.05, pose=(2.0, 4.0, 0.0), thermal=th, depth=dp))
+    for k in range(20):
+        b.step(obs(t=0.25 + k * 0.05, pose=(2.0, 4.0, 0.0), thermal=th, depth=dp, breath=0.1))
+    tr = [t for t in b.tracker.tracks if t.kind == 'warm'][0]
+    assert tr.state == 'verify' and tr.breath is not None  # POSSIBLE, still reported

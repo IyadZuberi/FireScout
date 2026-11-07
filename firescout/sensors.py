@@ -134,7 +134,7 @@ class Sensors:
         rxy = self._robot_xy()
         ok = False
         for i, t in enumerate(self.layout.things):
-            if t.breathing and math.dist(self._thing_xy(i), target) <= 0.5:
+            if t.breathing and math.dist(self._thing_xy(i), target) <= 1.0:  # radar beam footprint on a 1.7 m body
                 ok = math.dist(rxy, target) <= BREATH_RANGE and self._los(rxy, target)
         base = 0.85 if ok else 0.10
         return float(np.clip(base + self.rng.normal(0, 0.05), 0, 1))
