@@ -72,7 +72,7 @@ def test_detect_fire_and_warm_blob_projection():
     dp = np.full((120, 160), 3.0, np.float32)
     bs = detect_blobs(th, dp, (0.0, 0.0, 0.0))
     fire = [b for b in bs if b.kind == 'fire'][0]
-    assert abs(fire.xy[0] - 3.0) < 0.2 and abs(fire.xy[1]) < 0.2
+    assert abs(fire.xy[0] - 3.3) < 0.2 and abs(fire.xy[1]) < 0.2  # near surface 3.0 m + 0.3 m to seat centre
     warm = [b for b in bs if b.kind == 'warm'][0]
     assert warm.xy[1] > 0  # left of image => +y
     assert warm.width_m > warm.height_m
