@@ -1,0 +1,5 @@
+mujoco>=3.2
+numpy
+opencv-python
+rerun-sdk>=0.42
+pytest

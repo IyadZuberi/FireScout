@@ -1,0 +1,13 @@
+__pycache__/
+.venv/
+*.mp4
+*.rrd
+feedback.jsonl
+log.jsonl
+.env
+# organiser materials, not ours to publish
+agentverse.zip
+agentverse/
+*.pptx
+participant-timetable.pdf
+UCL_AgentVerse_2026_Builder_Guide.pdf
