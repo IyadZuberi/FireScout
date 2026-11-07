@@ -28,6 +28,9 @@ class Grid:
         self.heat = np.full(shape, AMBIENT_C, np.float32)
         self.gas = np.zeros(shape, np.float32)
         self.scanned = np.zeros(shape, bool)
+        self.o2 = np.full(shape, 20.9, np.float32)     # measured O2 % (min seen)
+        self.maxz = np.zeros(shape, np.float32)        # highest surface point seen in the cell (depth camera)
+        self.topz = np.zeros(shape, np.float32)        # height of a seen object TOP edge (depth jumps behind it)
 
     def to_cell(self, x: float, y: float) -> tuple[int, int]:
         return (min(max(int(y / self.res), 0), self.rows - 1),
@@ -239,6 +242,8 @@ class Track:
     ic: bool | None = None
     first_seen: float = 0.0
     breath_n: int = 0
+    responsive: bool = False   # heard calling (mic bearing matched this track)
+    priority: str = ''
 
 
 CAM_H, CAM_FWD = 0.33, 0.15  # thermal camera mount on the robot
@@ -356,12 +361,16 @@ VERIFY_TIMEOUT = 15.0
 SELF_TEMP_LIMIT = 60.0
 SPEED = 0.4
 SLOW_SPEED = 0.2
+FAST_SPEED = 0.7          # known, scanned, cool route: move fast
+VOICE_MATCH_RAD = 0.35    # mic bearing within this of a warm track = that person is calling
+VOICE_MEMORY_S = 25.0
+WALL_Z, FURN_MIN_Z = 1.4, 0.1
 
 
 @dataclass
 class Card:
     t: float
-    kind: Literal['REPLAN', 'VERIFY', 'PIN', 'REJECT', 'POSSIBLE', 'RETREAT', 'COMMS', 'LEARN', 'HOLD']
+    kind: str  # REPLAN VERIFY PIN REJECT POSSIBLE RETREAT COMMS LEARN HOLD HEAR PRIORITY IC
     trigger: str
     detail: str
     change: str
@@ -442,6 +451,13 @@ class Brain:
         self._parent = None
         self._verify_t0 = 0.0
         self.last_blobs: list[Blob] = []
+        self.voice_hint = None           # (x, y, world bearing, t) of an unexplained shout
+        self.ic_mode: str | None = None  # None | 'STOP' | 'RECALL'
+        self.ic_area = None              # (x0, y0, x1, y1) IC-ordered search area
+        self.speed = 0.0
+        self.speed_why = ''
+        self.rescue_order: list[Track] = []
+        self._last_hear = -99.0
         ys, xs = np.mgrid[0:self.grid.rows, 0:self.grid.cols]
         self._cx, self._cy = (xs + 0.5) * RES, (ys + 0.5) * RES
 
@@ -473,6 +489,91 @@ class Brain:
         self.emit('LEARN', 'IC', f'track#{tr.id} marked {"PERSON" if is_person else "NOT PERSON"}',
                   f'similar conf {before:.2f}->{tr.conf:.2f}', 'ic-feedback')
 
+    def ic(self, cmd: str, area=None) -> None:
+        """Incident Commander override. The safety gate still wins over every IC order."""
+        cmd = cmd.upper()
+        if cmd == 'STOP':
+            self.ic_mode = 'STOP'
+            self.emit('IC', 'IC', 'STOP ordered', 'holding position, sensors + reporting stay on', 'ic-override')
+        elif cmd == 'RESUME':
+            self.ic_mode, self.ic_area = None, None
+            self.emit('IC', 'IC', 'RESUME ordered', 'back to autonomous search', 'ic-override')
+        elif cmd == 'RECALL':
+            self.ic_mode = 'RECALL'
+            self.emit('IC', 'IC', 'RECALL ordered', 'returning to entry point', 'ic-override')
+        elif cmd == 'SEARCH':
+            self.ic_mode, self.ic_area = None, tuple(area)
+            self.emit('IC', 'IC', f'search area x{area[0]:.0f}-{area[2]:.0f} y{area[1]:.0f}-{area[3]:.0f} first',
+                      'exploration restricted to that area', 'ic-priority-area')
+
+    def _around(self, layer, xy, r, fn):
+        m = (self._cx - xy[0]) ** 2 + (self._cy - xy[1]) ** 2 <= r * r
+        return float(fn(layer[m])) if m.any() else float(fn(layer))
+
+    def priority(self, tr: Track) -> tuple[str, float, str]:
+        """Rescue priority for the crew (NOT clinical triage - extrication and triage stay medically led).
+        P1 = breathing and (unresponsive or in a hazardous spot); P2 = breathing, calling, spot survivable;
+        P? = warm body-shaped, breathing not yet confirmed: crew must check."""
+        g = self.grid
+        fire_d = min((math.dist(tr.xy, f[:2]) for f in self.fires), default=99.0)
+        heat = self._around(g.heat, tr.xy, 1.0, np.max)
+        co = self._around(g.gas, tr.xy, 1.5, np.max)
+        o2 = self._around(g.o2, tr.xy, 1.5, np.min)
+        why = []
+        if fire_d < 3.0:
+            why.append(f'{fire_d:.1f}m from fire')
+        if heat > 60:
+            why.append(f'{heat:.0f}C nearby')
+        if co > 400:
+            why.append(f'CO {co:.0f}ppm')
+        if o2 < 17.0:
+            why.append(f'O2 {o2:.1f}%')
+        hazard = bool(why)
+        why.append('calling out' if tr.responsive else 'no voice heard')
+        if tr.state != 'pinned':
+            label, base = 'P?', 50.0
+        elif not tr.responsive or hazard:
+            label, base = 'P1', 100.0
+        else:
+            label, base = 'P2', 30.0
+        score = (base + (0 if tr.responsive else 15) + max(0.0, 3.0 - fire_d) * 8 + co / 100
+                 + max(0.0, 17.0 - o2) * 5 + max(0.0, heat - 40) / 5)
+        return label, score, ', '.join(why)
+
+    def semantic(self) -> np.ndarray:
+        """0 unknown/free, 1 wall, 2 furniture, 3 person, 4 fire. From the depth camera: an object whose TOP
+        edge was seen below 1.4 m is furniture; tall surfaces or radar hits with no top seen are walls."""
+        g = self.grid
+        sem = np.zeros(g.occ.shape, np.int8)
+        sem[(g.occ == 1) | (g.maxz >= WALL_Z)] = 1
+        sem[(g.topz > FURN_MIN_Z) & (g.topz < WALL_Z) & (g.maxz < WALL_Z)] = 2
+        sem[g.heat > NO_GO_C] = 4
+        for tr in self.tracker.tracks:
+            if tr.kind == 'warm' and tr.state != 'rejected' and tr.conf >= VERIFY_CONF:
+                m = (self._cx - tr.xy[0]) ** 2 + (self._cy - tr.xy[1]) ** 2 <= 0.5 ** 2
+                sem[m] = 3
+        return sem
+
+    def _hear(self, obs) -> None:
+        x, y, yaw = obs.pose
+        for rel, db in obs.voices:
+            wb = _wrap(yaw + rel)
+            match = [tr for tr in self.tracker.tracks if tr.kind == 'warm' and tr.state != 'rejected'
+                     and abs(_wrap(math.atan2(tr.xy[1] - y, tr.xy[0] - x) - wb)) < VOICE_MATCH_RAD]
+            if match:
+                for tr in match:
+                    if not tr.responsive:
+                        tr.responsive = True
+                        self.emit('HEAR', 'mic', f'voice {db:.0f}dB matches track#{tr.id}', 'marked responsive',
+                                  'voice+thermal')
+                continue
+            new = self.voice_hint is None or abs(_wrap(self.voice_hint[2] - wb)) > 0.5
+            self.voice_hint = (x, y, wb, self.t)
+            if new or self.t - self._last_hear >= 8.0:
+                self._last_hear = self.t
+                self.emit('HEAR', 'mic', f'voice {db:.0f}dB bearing {math.degrees(wb):.0f}deg, no body seen there',
+                          'searching toward the sound', 'voice-prior')
+
     # ------------------------------------------------------------ main loop
     def step(self, obs) -> Command:
         t0 = time.perf_counter()
@@ -503,6 +604,7 @@ class Brain:
                 self._paint_heat(b.xy, b.temp_c)
         near = (self._cx - x) ** 2 + (self._cy - y) ** 2 <= 0.5 ** 2
         g.gas[near] = np.maximum(g.gas[near], obs.gas_ppm)
+        g.o2[near] = np.minimum(g.o2[near], obs.o2_pct)
         # measured heatmap + occlusion-aware coverage from the thermal pixels themselves
         px, py, pz, (pv, pu), pd = project_pixels(obs.depth, obs.pose)
         inside = (px >= 0) & (py >= 0) & (px < g.width) & (py < g.height)
@@ -512,10 +614,16 @@ class Brain:
         np.maximum.at(g.heat, (ci[low], cj[low]), temps[low].astype(np.float32))
         seen = (pz[inside] < 0.6) & (pd[inside] <= VIEW_RANGE)
         g.scanned[ci[seen], cj[seen]] = True
+        zz = pz[inside].astype(np.float32)
+        np.maximum.at(g.maxz, (ci, cj), zz)
+        above = obs.depth[np.maximum(pv[inside] - 4, 0), pu[inside]]
+        edge = ((above > pd[inside] + 0.5) | ~np.isfinite(above)) & (pv[inside] >= 4) & (temps < WARM_MASK_C)
+        np.maximum.at(g.topz, (ci[edge], cj[edge]), zz[edge])
         t1 = time.perf_counter()
 
         # ---- perception -> tracks
         self.tracker.update([b for b in blobs if b.kind == 'warm'], obs.t, obs.pose)
+        self._hear(obs)
         vt = self.track(self.verify_id) if self.verify_id else None
         if vt is not None and obs.breath is not None:
             vt.breath_n += 1
@@ -563,10 +671,7 @@ class Brain:
         cmd = self._plan(obs, cost, dist, parent, here)
         if self._ticks % 10 == 1 and dist is not None:
             self.exit_path = unwind(parent, self.start_cell) if np.isfinite(dist[self.start_cell]) else None
-            pins = [g.to_cell(*t.xy) for t in self.tracker.tracks if t.state == 'pinned'][:4]
-            pins = [self._near(self.tracker_xy(p), dist) or p for p in pins]
-            pins = [p for p in pins if np.isfinite(dist[p])]
-            self.rescue = rescue_route(cost, here, pins) if pins else None
+            self._update_rescue(cost, dist, here)
         t3 = time.perf_counter()
         self.timings = {'map': (t1 - t0) * 1e3, 'perceive': (t2 - t1) * 1e3, 'plan': (t3 - t2) * 1e3,
                         'total': (t3 - t0) * 1e3}
@@ -605,6 +710,30 @@ class Brain:
                               f'({(len(new) - len(old)) * RES / SPEED:+.0f}s)', rule)
         self.goal, self.path = goal, new
 
+    def _update_rescue(self, cost, dist, here) -> None:
+        """Rescue route visits confirmed casualties in priority order (P1 first)."""
+        pinned = [t for t in self.tracker.tracks if t.state == 'pinned']
+        for tr in pinned:
+            label, score, why = self.priority(tr)
+            if label != tr.priority:
+                tr.priority = label
+                self.emit('PRIORITY', 'thermal+radar+mic+gas', f'casualty#{tr.id} {label}: {why}',
+                          'rescue order updated', 'rescue-priority')
+        ranked = sorted(pinned, key=lambda t: -self.priority(t)[1])[:4]
+        visit, cur, path = [], here, [here]
+        for tr in ranked:
+            tgt = self._near(tr.xy, dist) or self.grid.to_cell(*tr.xy)
+            if not np.isfinite(dist[tgt]):
+                continue
+            leg = astar(cost, cur, tgt)
+            if leg is None:
+                continue
+            path += leg[1:]
+            visit.append(tr)
+            cur = tgt
+        self.rescue_order = visit
+        self.rescue = (list(range(len(visit))), path) if visit else None
+
     def _plan(self, obs, cost, dist, parent, here) -> Command:
         g = self.grid
         x, y, yaw = obs.pose
@@ -628,7 +757,18 @@ class Brain:
             else:
                 return self._drive_to(self._coolest(here), obs, cost, dist, parent)
 
-        # 2. verify uncertain casualty (second look + radar breath check)
+        # 2. Incident Commander orders (below safety, above autonomy)
+        if self.ic_mode == 'STOP':
+            self.mode, self.path = 'IC_STOP', []
+            return Command(0.0, 0.0, 0.0)
+        if self.ic_mode == 'RECALL':
+            self.mode = 'RECALL'
+            if math.dist((x, y), g.to_world(*self.start_cell)) < 0.4:
+                self.path = []
+                return Command(0.0, 0.0, 0.0)
+            return self._drive_to(self.start_cell, obs, cost, dist, parent)
+
+        # 3. verify uncertain casualty (second look + radar breath check)
         vt = self.track(self.verify_id) if self.verify_id else None
         if vt is not None and vt.state in ('pinned', 'rejected'):
             self.verify_id, vt = None, None
@@ -661,7 +801,21 @@ class Brain:
             fmask[:, 1:] |= unk[:, :-1]
             fmask[:, :-1] |= unk[:, 1:]
             goal_mask = (g.occ == 0) & (fmask | ~g.scanned) & (cost < 6.0) & np.isfinite(dist)                 & (np.hypot(self._cx - x, self._cy - y) > 0.6)
-            if self.goal is not None and goal_mask[self.goal]:
+            if self.ic_area is not None:
+                ax0, ay0, ax1, ay1 = self.ic_area
+                in_area = (self._cx >= ax0) & (self._cx <= ax1) & (self._cy >= ay0) & (self._cy <= ay1)
+                if (goal_mask & in_area).any():
+                    goal_mask &= in_area
+                else:
+                    self.emit('IC', 'map', 'IC priority area searched', 'resuming autonomous search',
+                              'ic-priority-area')
+                    self.ic_area = None
+            hint = self.voice_hint if self.voice_hint and self.t - self.voice_hint[3] < VOICE_MEMORY_S else None
+            if hint is not None and goal_mask.any():
+                ang = np.arctan2(self._cy - hint[1], self._cx - hint[0])
+                score = np.where(goal_mask, dist + 8.0 * (1 - np.cos(ang - hint[2])), np.inf)
+                target = tuple(int(v) for v in np.unravel_index(np.argmin(score), dist.shape))
+            elif self.goal is not None and goal_mask[self.goal]:
                 target = self.goal
             elif goal_mask.any():
                 target = tuple(int(v) for v in np.unravel_index(np.argmin(np.where(goal_mask, dist, np.inf)),
@@ -717,6 +871,21 @@ class Brain:
                 return c
         return None
 
+    def _pick_speed(self, x, y) -> tuple[float, str]:
+        """Fast where the next 3 m are mapped, scanned and cool; slow near heat or a casualty; normal otherwise."""
+        g = self.grid
+        ahead = self.path[:12]
+        heat = max((float(g.heat[c]) for c in ahead), default=AMBIENT_C)
+        near_person = any(t.kind == 'warm' and t.state in ('pinned', 'verify') and math.dist(t.xy, (x, y)) < 1.5
+                          for t in self.tracker.tracks)
+        if heat > 80 or near_person:
+            return SLOW_SPEED, 'slow: heat ahead' if heat > 80 else 'slow: casualty close'
+        warm_near = any(t.kind == 'warm' and t.state == 'candidate' and math.dist(t.xy, (x, y)) < 2.5
+                        for t in self.tracker.tracks)
+        if ahead and heat < 40 and all(g.scanned[c] for c in ahead) and not warm_near:
+            return FAST_SPEED, 'fast: known cool route'
+        return SPEED, 'normal: searching'
+
     def _drive_to(self, target, obs, cost, dist, parent) -> Command:
         x, y, yaw = obs.pose
         if dist is None or target is None or not np.isfinite(dist[target]):
@@ -735,8 +904,8 @@ class Brain:
         dn = math.hypot(dx, dy)
         if dn < 1e-3:
             return Command(0.0, 0.0, 0.0)
-        speed = SLOW_SPEED if any(t.state == 'pinned' and math.dist(t.xy, (x, y)) < 1.5
-                                  for t in self.tracker.tracks) else SPEED
+        speed, self.speed_why = self._pick_speed(x, y)
         turn = _wrap(math.atan2(dy, dx) - yaw)
         k = max(0.0, math.cos(turn))  # slow while turning so the thermal camera looks where it goes
+        self.speed = speed * k
         return Command(dx / dn * speed * k, dy / dn * speed * k, float(np.clip(2.5 * turn, -1.5, 1.5)))

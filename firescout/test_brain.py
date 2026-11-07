@@ -236,3 +236,95 @@ def test_ic_feedback_rejects_and_logs(tmp_path):
     b.feedback(tr.id, False)
     assert tr.state == 'rejected' and b.cards[-1].kind == 'LEARN'
     assert (tmp_path / 'fb.jsonl').exists()
+
+
+# ---------------------------------------------------------------- smart search + IC control
+def test_voice_steers_search_toward_bearing():
+    b = Brain(12, 8, (6.0, 4.0))
+    b.step(obs(pose=(6.0, 4.0, 0.0)))
+    b.step(obs(t=0.1, pose=(6.0, 4.0, 0.0), voices=[(math.pi / 2, 50.0)]))  # shout from the robot's left = north
+    assert any(c.kind == 'HEAR' for c in b.cards)
+    gx, gy = b.grid.to_world(*b.goal)
+    assert abs(math.atan2(gy - 4.0, gx - 6.0) - math.pi / 2) < math.radians(30)  # heading for the voice
+
+
+def test_voice_marks_track_responsive():
+    b = Brain(12, 8, (2.0, 4.0))
+    th, dp = person_frame()
+    for k in range(4):
+        b.step(obs(t=k * 0.05, pose=(2.0, 4.0, 0.0), thermal=th, depth=dp, voices=[(0.05, 55.0)]))
+    assert any(tr.responsive for tr in b.tracker.tracks if tr.kind == 'warm')
+
+
+def test_ic_stop_resume_recall():
+    b = Brain(12, 8, (1.0, 4.0))
+    b.grid.occ[:] = 0
+    b.ic('STOP')
+    cmd = b.step(obs(pose=(6.0, 4.0, math.pi)))
+    assert b.mode == 'IC_STOP' and abs(cmd.vx) + abs(cmd.vy) < 1e-6 and b.cards[-1].kind == 'IC'
+    b.ic('RECALL')
+    b.step(obs(t=0.1, pose=(6.0, 4.0, math.pi)))
+    assert b.mode == 'RECALL' and b.goal == b.start_cell
+    b.step(obs(t=0.2, pose=(6.0, 4.0, math.pi), self_temp_c=70))  # safety gate beats any IC order
+    assert b.mode == 'RETREAT'
+
+
+def test_ic_search_area_restricts_goal():
+    b = Brain(12, 8, (6.0, 4.0))
+    b.ic('SEARCH', area=(9.0, 0.0, 12.0, 3.0))
+    b.step(obs(pose=(6.0, 4.0, 0.0)))
+    gx, gy = b.grid.to_world(*b.goal)
+    assert 9.0 <= gx <= 12.0 and 0.0 <= gy <= 3.0
+
+
+def _pinned(b, xy, responsive):
+    tr = Track(len(b.tracker.tracks) + 1, 'warm', xy, deque([36.0]), deque([True]), 1.7, 0.3,
+               breath=0.9, conf=0.9, state='pinned', responsive=responsive)
+    b.tracker.tracks.append(tr)
+    return tr
+
+
+def test_priority_unresponsive_or_near_fire_is_p1():
+    b = Brain(12, 8, (1.0, 4.0))
+    b.fires = [(10.0, 6.0, 600.0)]
+    near = _pinned(b, (9.0, 6.0), responsive=True)
+    calm = _pinned(b, (3.0, 2.0), responsive=True)
+    limp = _pinned(b, (3.0, 6.0), responsive=False)
+    assert b.priority(near)[0] == 'P1' and b.priority(limp)[0] == 'P1' and b.priority(calm)[0] == 'P2'
+    assert b.priority(near)[1] > b.priority(calm)[1]
+
+
+def test_rescue_route_visits_highest_priority_first():
+    b = Brain(12, 8, (1.0, 4.0))
+    b.grid.occ[:] = 0
+    b.fires = [(10.0, 6.0, 600.0)]
+    _pinned(b, (3.0, 4.0), responsive=True)   # close but low priority
+    hi = _pinned(b, (9.0, 6.0), responsive=False)
+    b.step(obs(pose=(1.0, 4.0, 0.0)))
+    first = b.rescue[0][0]
+    assert b.rescue_order[first].id == hi.id
+
+
+def test_adaptive_speed_fast_when_known_and_cool_slow_near_heat():
+    b = Brain(12, 8, (1.0, 4.0))
+    b.grid.occ[:] = 0
+    b.grid.scanned[:] = True
+    b.ic('RECALL')
+    cmd = b.step(obs(pose=(8.0, 4.0, math.pi)))
+    assert math.hypot(cmd.vx, cmd.vy) > 0.55
+    i, j = b.grid.to_cell(7.0, 4.0)
+    b.grid.heat[i - 1:i + 2, j - 1:j + 2] = 120
+    cmd = b.step(obs(t=0.1, pose=(8.0, 4.0, math.pi)))
+    assert math.hypot(cmd.vx, cmd.vy) < 0.3
+
+
+def test_depth_edge_tells_furniture_from_wall():
+    b = Brain(12, 8, (2.0, 4.0))
+    dp = np.full((120, 160), 5.5, np.float32)
+    dp[75:, 60:100] = 1.2   # low box 1.2 m ahead, far wall visible over its top
+    b.step(obs(pose=(2.0, 4.0, 0.0), depth=dp))
+    sem = b.semantic()
+    i, j = b.grid.to_cell(3.3, 4.0)
+    assert (sem[i - 1:i + 2, j - 1:j + 3] == 2).any()      # furniture
+    i, j = b.grid.to_cell(8.0, 4.0)
+    assert (sem[i - 2:i + 3, j - 2:j + 3] == 1).any()      # wall (tall, top never seen)

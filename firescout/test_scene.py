@@ -38,3 +38,25 @@ def test_robot_moves_with_ctrl():
     for _ in range(200):
         mujoco.mj_step(m, d)
     assert d.qpos[0] > x0 + 0.3
+
+
+def test_presets_counts_and_load():
+    from scene import PRESETS
+    for k, preset in enumerate(PRESETS):
+        L = generate_layout(k, preset=preset, n_casualties=3, n_fires=2)
+        kinds = [t.kind for t in L.things]
+        assert kinds.count('casualty') == 3 and kinds.count('fire') == 2, preset
+        assert L.width == PRESETS[preset]['width'] and len(L.rooms) == len(PRESETS[preset]['rooms'])
+        assert L.preset == preset
+        load(L)
+
+
+def test_some_casualties_call_out():
+    cas = [t for s in range(15) for t in generate_layout(s, n_casualties=3).things if t.kind == 'casualty']
+    assert any(t.responsive for t in cas) and not all(t.responsive for t in cas)
+
+
+def test_flames_are_many_tongues():
+    L = generate_layout(2, n_fires=1)
+    xml = __import__('scene').build_mjcf(L)
+    assert xml.count('material="flame') >= 10

@@ -21,7 +21,19 @@ WALL_H = 2.4
 WALL_T = 0.12
 CORRIDOR = (3.2, 4.8)  # y-span of the central corridor
 DOOR_W = 1.0
-N_SMOKE = 36
+N_SMOKE = 60
+N_TONGUES = 12   # flame tongues per fire (animated + grown by run.World)
+# Building presets the judges can pick. Rooms are listed north row first, then south row.
+PRESETS = {
+    'flat': {'name': '2-bed flat', 'width': 9.0,
+             'rooms': ['bedroom', 'lounge', 'bedroom', 'kitchen']},
+    'care_home': {'name': 'Care-home wing', 'width': 12.0,
+                  'rooms': ['bedroom', 'bedroom', 'lounge', 'bedroom', 'office']},
+    'care_home_large': {'name': 'Care-home floor (large)', 'width': 18.0,
+                        'rooms': ['bedroom', 'bedroom', 'lounge', 'bedroom', 'bedroom', 'bedroom', 'kitchen']},
+    'office': {'name': 'Office floor', 'width': 14.0,
+               'rooms': ['office', 'office', 'kitchen', 'office', 'office', 'lounge']},
+}
 MESH_GROUP = 5   # detailed SimReady meshes: viewer + RGB camera only; thermal/depth use group-3 box colliders
 SMOKE_GROUP = 2  # rendered in the viewer + RGB camera, invisible to the thermal camera (LWIR sees through smoke)
 
@@ -60,6 +72,7 @@ class Thing:
     temp_c: float
     breathing: bool = False
     yaw: float = 0.0
+    responsive: bool = False  # conscious casualty: calls for help (heard by the microphones)
     style: str = ''  # visual style: radiator / pipe / pet / ''
 
 
@@ -81,6 +94,8 @@ class Layout:
     seed: int
     rooms: list[tuple[float, float, float, float]] = field(default_factory=list)  # x0,y0,x1,y1
     props: list[Prop] = field(default_factory=list)
+    preset: str = 'care_home'
+    room_kinds: list[str] = field(default_factory=list)
 
 
 def _split(rng, x0, x1, n, min_w=2.6):
@@ -100,8 +115,8 @@ def _wall_with_gap(a, b, fixed, gap_c, horizontal):
     return segs
 
 
-def _furnish(rng, rooms, doors, has_assets) -> tuple[list[Prop], list[tuple]]:
-    """Care-home furniture. Returns props and their footprints (cx, cy, hx, hy) for collision-free placement."""
+def _furnish(rng, rooms, doors, has_assets, kinds) -> tuple[list[Prop], list[tuple]]:
+    """Room furniture by room kind. Returns props and footprints (cx, cy, hx, hy) for collision-free placement."""
     props, foot = [], []
     if not has_assets:
         return props, foot
@@ -112,10 +127,6 @@ def _furnish(rng, rooms, doors, has_assets) -> tuple[list[Prop], list[tuple]]:
             hx, hy = hy, hx
         foot.append((float(x), float(y), hx, hy))
 
-    kinds = ['bedroom'] * len(rooms)
-    order = rng.permutation(len(rooms))
-    kinds[int(order[0])] = 'lounge'
-    kinds[int(order[1])] = 'office'
     for (x0, y0, x1, y1), door_x, kind in zip(rooms, doors, kinds):
         top = y0 >= CORRIDOR[1] - 1e-6  # room north of the corridor: door on its south wall
         far = y1 - 0.62 if top else y0 + 0.62
@@ -129,6 +140,11 @@ def _furnish(rng, rooms, doors, has_assets) -> tuple[list[Prop], list[tuple]]:
             if rng.random() < 0.6:
                 add('iv', bx + (1.3 if bx < cx else -1.3), far - (0.3 if top else -0.3), 0.0, 0.15, 0.15)
             add('bin', x1 - 0.25 if door_x < cx else x0 + 0.25, near + (0.05 if top else -0.05), 0.0, 0.16, 0.1)
+        elif kind == 'kitchen':
+            add('cabinet', x0 + 0.3, far, 0.0, 0.2, 0.41)
+            add('cabinet', x0 + 1.2, far, 0.0, 0.2, 0.41)
+            add('bin', x1 - 0.3, far, 0.0, 0.16, 0.1)
+            add('chair', cx + 0.3, (far + near) / 2, 0.0)
         elif kind == 'lounge':
             add('sofa', cx - 0.5, far, math.pi if top else 0.0, 0.36, 0.36)
             add('sofa', cx + 0.4, far, math.pi if top else 0.0, 0.36, 0.36)
@@ -141,9 +157,13 @@ def _furnish(rng, rooms, doors, has_assets) -> tuple[list[Prop], list[tuple]]:
     return props, foot
 
 
-def generate_layout(seed: int, n_rooms: int = 5) -> Layout:
+def generate_layout(seed: int, preset: str = 'care_home', n_casualties: int | None = None,
+                    n_fires: int | None = None) -> Layout:
+    """Procedural floor for a building preset. None counts = random (fires 1-2, casualties 0-2)."""
     rng = np.random.default_rng(seed)
-    W, H = 12.0, 8.0
+    P = PRESETS[preset]
+    n_rooms = len(P['rooms'])
+    W, H = P['width'], 8.0
     c0, c1 = CORRIDOR
     n_top = n_rooms // 2 + n_rooms % 2
     n_bot = n_rooms - n_top
@@ -160,7 +180,8 @@ def generate_layout(seed: int, n_rooms: int = 5) -> Layout:
             if k > 0:  # dividing wall with an inter-room door -> alternative routes
                 walls += _wall_with_gap(y0, y1, x0, float(rng.uniform(y0 + 0.9, y1 - 0.9)), horizontal=False)
     start = (1.0, (c0 + c1) / 2)
-    props, foot = _furnish(rng, rooms, doors, bool(asset_meta()))
+    kinds = P['rooms'][:n_top] + P['rooms'][n_top:]
+    props, foot = _furnish(rng, rooms, doors, bool(asset_meta()), kinds)
 
     things: list[Thing] = []
     taken: list[tuple[float, float]] = [start]
@@ -171,7 +192,7 @@ def generate_layout(seed: int, n_rooms: int = 5) -> Layout:
     def place(kind, size, temp, room_ok=True, near_bed=False, **kw):
         r = max(size[0], size[1]) / 2
         for _ in range(800):
-            if near_bed and props:  # lying on the floor beside a bed
+            if near_bed and any(p.key == 'bed' for p in props):  # lying on the floor beside a bed
                 beds = [p for p in props if p.key == 'bed']
                 b = beds[int(rng.integers(len(beds)))]
                 top = b.xy[1] > c1
@@ -194,10 +215,12 @@ def generate_layout(seed: int, n_rooms: int = 5) -> Layout:
             near_bed = near_bed and _ < 200
         raise RuntimeError(f'could not place {kind} (seed {seed})')
 
-    for _ in range(int(rng.integers(1, 3))):
+    n_fires = int(rng.integers(1, 3)) if n_fires is None else n_fires
+    n_casualties = int(rng.integers(0, 3)) if n_casualties is None else n_casualties
+    for _ in range(n_fires):
         place('fire', (0.6, 0.6, 0.9), float(rng.uniform(400, 700)))
     hm = human_meta()
-    for _ in range(int(rng.integers(0, 3))):
+    for _ in range(n_casualties):
         size, style = (1.7, 0.5, 0.3), ''
         if hm:  # style = "<sex>_<pose>|<outfit>|<hair>"
             sex = 'm' if rng.random() < 0.5 else 'f'
@@ -206,7 +229,8 @@ def generate_layout(seed: int, n_rooms: int = 5) -> Layout:
             size = (sx_, sy_, sz_)
             style = f'{sex}_{pose}|{sex}{int(rng.integers(2))}|{"grey" if rng.random() < 0.7 else "dark"}'
         place('casualty', size, float(rng.uniform(34, 37)), near_bed=rng.random() < 0.7,
-              breathing=True, yaw=float(rng.choice([0.0, math.pi]) + rng.uniform(-0.3, 0.3)), style=style)
+              breathing=True, yaw=float(rng.choice([0.0, math.pi]) + rng.uniform(-0.3, 0.3)), style=style,
+              responsive=bool(rng.random() < 0.4))
     decoys = [('radiator', (0.08, 0.55, 0.5), float(rng.uniform(45, 60))),
               ('pipe', (1.2, 0.12, 0.12), 70.0),
               ('pet', (0.4, 0.3, 0.3), 38.0)]
@@ -214,7 +238,7 @@ def generate_layout(seed: int, n_rooms: int = 5) -> Layout:
         style, size, temp = decoys[int(i)]
         place('decoy', size, temp, style=style)
     place('shelf', (0.4, 0.82, 1.36), 20.0, room_ok=False)
-    return Layout(W, H, walls, things, start, seed, rooms, props)
+    return Layout(W, H, walls, things, start, seed, rooms, props, preset, kinds)
 
 
 # ---------------------------------------------------------------- MJCF
@@ -241,6 +265,17 @@ def _human(add, rng):
         add(type='box', size=_f(0.03, 0.045, 0.08), pos=_f(-0.95, 0.14 * s, 0.08), material='shoe')
 
 
+def _tongues(add, rng, z0, group):
+    """Flame tongues: thin tall emissive ellipsoids, hottest (white-yellow) inside, red outside. run.World moves,
+    stretches and spreads them every frame so the fire flickers and grows."""
+    for k in range(N_TONGUES):
+        a, rr = rng.uniform(0, 2 * math.pi), 0.22 * math.sqrt(rng.uniform())
+        r = rng.uniform(0.05, 0.1)
+        h = rng.uniform(0.25, 0.55) * (1.25 - rr)
+        add(type='ellipsoid', size=_f(r, r * 0.8, h), pos=_f(rr * math.cos(a), rr * math.sin(a), z0 + h * 0.8),
+            material=f'flame{min(3, int(rr / 0.07) + k % 2)}', contype='0', conaffinity='0', group=group)
+
+
 def _thing_geoms(i: int, t: Thing, rng, meta) -> str:
     """Visual + collision geoms for one Thing; every geom named thing{i}_g{k}."""
     sx, sy, sz = t.size
@@ -255,10 +290,7 @@ def _thing_geoms(i: int, t: Thing, rng, meta) -> str:
         add(type='box', size=_f(0.32, 0.28, 0.06), pos=_f(0, 0, 0.06), euler='0 0 12', material='char')
         add(type='box', size=_f(0.2, 0.08, 0.05), pos=_f(0.12, 0.1, 0.15), euler='0 25 40', material='char')
         add(type='ellipsoid', size=_f(0.3, 0.3, 0.06), pos=_f(0, 0, 0.12), material='ember', contype='0', conaffinity='0')
-        for k, (r, z, mat) in enumerate(((0.34, 0.32, 'flame0'), (0.26, 0.75, 'flame1'), (0.18, 1.12, 'flame2'),
-                                         (0.12, 1.4, 'flame3'))):
-            add(type='ellipsoid', size=_f(r, r * 0.9, r * 1.5), pos=_f(0.03 * k, -0.02 * k, z), material=mat,
-                contype='0', conaffinity='0', group='1')
+        _tongues(add, rng, 0.0, '1')
     elif t.kind == 'casualty' and t.style:
         v, outfit, hair = t.style.split('|')
         add(type='mesh', mesh=f'human_{v}', material=f'cloth_{outfit}')
@@ -279,9 +311,7 @@ def _thing_geoms(i: int, t: Thing, rng, meta) -> str:
         add(type='sphere', size='0.07', pos=_f(0.22, 0, 0.16), material='fur')
         add(type='capsule', size=_f(0.02, 0.08), pos=_f(-0.24, 0, 0.1), euler='0 60 0', material='fur')
     elif t.kind == 'shelf':
-        for k, (r, z) in enumerate(((0.3, 1.55), (0.22, 1.9), (0.14, 2.15))):  # hidden until ignited (group 4)
-            add(type='ellipsoid', size=_f(r, r * 0.8, r * 1.5), pos=_f(0.02 * k, 0, z), material=f'flame{k}',
-                contype='0', conaffinity='0', group='4')
+        _tongues(add, rng, 1.36, '4')  # hidden until ignited (group 4)
         if 'cabinet' in meta:
             add(type='mesh', mesh='cabinet', material='mcabinet', contype='0', conaffinity='0', group=str(MESH_GROUP))
             add(type='box', size=_f(0.2, 0.41, 0.68), pos=_f(0, 0, 0.68), group='3', rgba='0.6 0.6 0.6 1')
@@ -395,7 +425,7 @@ def build_mjcf(layout: Layout) -> str:
     <material name="flame1" rgba="1 0.52 0.08 0.72" emission="1"/>
     <material name="flame2" rgba="1 0.78 0.25 0.55" emission="1"/>
     <material name="flame3" rgba="1 0.92 0.6 0.35" emission="1"/>
-    <material name="smoke" rgba="0.24 0.24 0.25 0.07"/>
+    <material name="smoke" rgba="0.2 0.2 0.21 0.06"/>
     <material name="skin" rgba="0.82 0.62 0.5 1" specular="0.15"/>
     <material name="shirt_a" rgba="0.62 0.7 0.82 1"/>
     <material name="shirt_b" rgba="0.75 0.62 0.68 1"/>

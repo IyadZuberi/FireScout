@@ -37,6 +37,12 @@ class Observation:
     battery: float
     rgb: np.ndarray | None = None
     breath: float | None = None
+    o2_pct: float = 20.9
+    voices: list = None  # [(bearing rad relative to heading, level dB)] from the 4-mic array
+
+    def __post_init__(self):
+        if self.voices is None:
+            self.voices = []
 
 
 class Sensors:
@@ -159,6 +165,27 @@ class Sensors:
         co = sum(2000.0 * math.exp(-math.dist(xy, f) / 2.0) for f, _ in self._fires())
         return max(0.0, co + float(self.rng.normal(0, 20)))
 
+    def _o2(self, xy):
+        """Electrochemical O2 cell: combustion depletes oxygen near the fire seat (clean air 20.9%)."""
+        dep = sum(min(1.0, (T - AMBIENT_C) / 600) * 4.0 * math.exp(-math.dist(xy, f) / 1.5) for f, T in self._fires())
+        return float(np.clip(20.9 - dep + self.rng.normal(0, 0.05), 10.0, 20.95))
+
+    def _voices(self, xy):
+        """Responsive casualties shout ~2 s in every 7 s. 70 dB at 1 m, spherical spreading, -12 dB through walls;
+        the mic array reports bearing (+/-0.15 rad noise) relative to the robot heading when level > 30 dB."""
+        out = []
+        t = float(self.d.time)
+        for i, th in enumerate(self.layout.things):
+            if th.kind != 'casualty' or not th.responsive or (t + 2.3 * i) % 7.0 >= 2.0:
+                continue
+            p = self._thing_xy(i)
+            dist = max(0.3, math.dist(xy, p))
+            db = 70.0 - 20 * math.log10(dist) - (0.0 if self._los(xy, p) else 12.0) + float(self.rng.normal(0, 1))
+            if db > 30.0:
+                b = math.atan2(p[1] - xy[1], p[0] - xy[0]) - self._yaw() + float(self.rng.normal(0, 0.15))
+                out.append((math.atan2(math.sin(b), math.cos(b)), db))
+        return out
+
     def _los(self, a, b):
         """True if nothing but the target thing / free space lies between a and b."""
         pnt = np.array([a[0], a[1], 0.15])
@@ -192,4 +219,5 @@ class Sensors:
             t=float(self.d.time), pose=pose, thermal=thermal, depth=depth, ranges=self._ranges(),
             gas_ppm=self._gas(xy), comms=comms, self_temp_c=self.self_temp, battery=self.battery,
             rgb=self._rgb() if self.render_rgb else None,
-            breath=self._breath(want_breath_xy) if want_breath_xy is not None else None)
+            breath=self._breath(want_breath_xy) if want_breath_xy is not None else None,
+            o2_pct=self._o2(xy), voices=self._voices(xy))

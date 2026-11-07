@@ -28,8 +28,10 @@ def methane(b: Brain, t: float | None = None) -> str:
         if b.rescue else 'not yet planned'
     exit_ = f'{len(b.exit_path) * RES:.1f} m back to entry' if b.exit_path else 'unknown (no safe route found)'
     if pinned:
-        n = (f'N: {len(pinned)} confirmed casualt{"y" if len(pinned) == 1 else "ies"} '
-             + '; '.join(f'#{tr.id} at {_xy(tr.xy)} conf {tr.conf:.2f}, breathing {tr.breath:.2f}' for tr in pinned))
+        ranked = sorted(pinned, key=lambda tr: -b.priority(tr)[1])
+        n = (f'N: {len(pinned)} confirmed casualt{"y" if len(pinned) == 1 else "ies"} (rescue priority, not clinical '
+             'triage) ' + '; '.join(f'{b.priority(tr)[0]} #{tr.id} at {_xy(tr.xy)} breathing {tr.breath:.2f}, '
+                                    f'{b.priority(tr)[2]}' for tr in ranked))
     else:
         n = 'N: 0 confirmed casualties'
     if possible:
@@ -43,7 +45,8 @@ def methane(b: Brain, t: float | None = None) -> str:
         f'M: FireScout recon report T+{mm:02d}:{ss:02d} (robot sitrep, not a major-incident declaration)',
         f'E: Entry point {_xy((x, y))}, single floor; robot mode {b.mode}',
         'T: Structure fire, ' + (', '.join(f'seat at {_xy(f)} ~{f[2]:.0f}°C' for f in fires[:3]) or 'no fire seat seen yet'),
-        f'H: No-go >{NO_GO_C:.0f}°C: {hot_cells * RES * RES:.1f} m²; max CO {gas_max:.0f} ppm at {_xy(gas_at)}',
+        f'H: No-go >{NO_GO_C:.0f}°C: {hot_cells * RES * RES:.1f} m²; max CO {gas_max:.0f} ppm at {_xy(gas_at)}; '
+        f'min O2 {float(g.o2.min()):.1f}%',
         f'A: Rescue route {rescue}; exit route {exit_}',
         n,
         f'E: BA crew for rescue; ambulance for {len(pinned)} confirmed + {len(possible)} possible casualties',

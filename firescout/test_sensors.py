@@ -12,7 +12,7 @@ OUTER = [(0, 0, 12, 0), (0, 8, 12, 8), (0, 0, 0, 8), (12, 0, 12, 8)]
 def open_layout():
     things = [
         Thing('fire0', 'fire', (6.0, 4.0), (0.6, 0.6, 0.9), 600.0),
-        Thing('casualty1', 'casualty', (6.0, 6.5), (1.7, 0.5, 0.3), 36.0, breathing=True),
+        Thing('casualty1', 'casualty', (6.0, 6.5), (1.7, 0.5, 0.3), 36.0, breathing=True, responsive=True),
         Thing('decoy2', 'decoy', (3.0, 6.5), (1.0, 0.1, 0.6), 55.0, style='radiator'),
         Thing('shelf3', 'shelf', (9.0, 1.5), (0.9, 0.35, 1.2), 20.0),
     ]
@@ -89,3 +89,25 @@ def test_ignite_shelf_makes_it_hot():
     s.ignite(3, 450.0)
     face(m, d, (9.0, 1.5), 2.0, math.pi)
     assert s.observe().thermal.max() > 150
+
+
+def test_o2_drops_near_fire():
+    L, m, d, s = setup()
+    face(m, d, (6.0, 4.0), 5.0, math.pi)
+    far = s.observe().o2_pct
+    face(m, d, (6.0, 4.0), 0.9, math.pi)
+    near = s.observe().o2_pct
+    assert 20.5 <= far <= 21.0 and near < 19.0
+
+
+def test_voice_heard_with_relative_bearing():
+    L, m, d, s = setup()
+    face(m, d, (6.0, 6.5), 3.0, -math.pi / 2)   # casualty straight ahead
+    heard = []
+    for k in range(80):
+        d.time = k * 0.1
+        heard += s.observe().voices
+    assert heard, 'responsive casualty never heard'
+    assert all(abs(b) < 0.5 for b, db in heard) and all(db > 30 for b, db in heard)
+    L.things[1].responsive = False
+    assert not any(s.observe().voices for k in range(5))
