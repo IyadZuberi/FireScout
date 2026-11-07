@@ -206,3 +206,33 @@ def test_no_breath_keeps_possible_not_dropped():
         b.step(obs(t=0.25 + k * 0.05, pose=(2.0, 4.0, 0.0), thermal=th, depth=dp, breath=0.1))
     tr = [t for t in b.tracker.tracks if t.kind == 'warm'][0]
     assert tr.state == 'verify' and tr.breath is not None  # POSSIBLE, still reported
+
+
+# ---------------- Task 9: should-tier
+def test_gas_raises_cost():
+    g = open_grid()
+    base = cost_map(g)[8, 8]
+    g.gas[8, 8] = 1000
+    assert cost_map(g)[8, 8] > base + 1.5
+
+
+def test_comms_lost_from_start_returns_when_done():
+    b = Brain(4, 4, (0.5, 0.5))
+    b.grid.occ[:] = 0
+    b.grid.scanned[:] = True
+    b.step(obs(pose=(0.5, 0.5, 0.0)))  # in radio range here -> last good comms cell
+    for k in range(25):  # moved away, radio lost, nothing left to explore
+        b.step(obs(t=0.05 * (k + 1), pose=(3.0, 3.0, 0.0), comms=False))
+    assert b.mode == 'RETURN_COMMS' and b.outbox
+    assert any(c.kind == 'COMMS' and 'returning' in c.change for c in b.cards)
+
+
+def test_ic_feedback_rejects_and_logs(tmp_path):
+    b = Brain(12, 8, (2.0, 4.0), feedback_path=str(tmp_path / 'fb.jsonl'))
+    th, dp = person_frame()
+    for k in range(3):
+        b.step(obs(t=k * 0.05, pose=(2.0, 4.0, 0.0), thermal=th, depth=dp))
+    tr = [t for t in b.tracker.tracks if t.kind == 'warm'][0]
+    b.feedback(tr.id, False)
+    assert tr.state == 'rejected' and b.cards[-1].kind == 'LEARN'
+    assert (tmp_path / 'fb.jsonl').exists()
