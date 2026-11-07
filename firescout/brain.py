@@ -152,3 +152,144 @@ def rescue_route(cost: np.ndarray, start, targets):
             if best is None or total < best[0]:
                 best = (total, list(perm), path)
     return None if best is None else (best[1], best[2])
+
+
+# ================================================================ perception
+import json
+from collections import deque
+from dataclasses import dataclass, field
+from typing import Literal
+
+HFOV_DEG = 57.0
+VIEW_RANGE = 4.0
+FIRE_C = 150.0
+WARM_MASK_C = 28.0
+CAS_LO, CAS_HI = 30.0, 42.0
+
+
+@dataclass
+class Blob:
+    kind: Literal['fire', 'warm']
+    xy: tuple[float, float]
+    temp_c: float
+    width_m: float
+    height_m: float
+    box: tuple[int, int, int, int] = (0, 0, 0, 0)  # u, v, w, h in image px (for overlay)
+
+
+def detect_blobs(thermal, depth, pose, hfov_deg: float = HFOV_DEG) -> list[Blob]:
+    """Connected warm regions (>28 C) -> world-frame blobs; fire if peak > FIRE_C."""
+    H, W = thermal.shape
+    fx = (W / 2) / math.tan(math.radians(hfov_deg) / 2)
+    cx = (W - 1) / 2
+    x, y, yaw = pose
+    n, lab, stats, cent = cv2.connectedComponentsWithStats((thermal > WARM_MASK_C).astype(np.uint8))
+    out = []
+    for k in range(1, n):
+        u, v, w, h, area = (int(s) for s in stats[k])
+        if area < 6:
+            continue
+        mask = lab == k
+        dvals = depth[mask]
+        dvals = dvals[np.isfinite(dvals) & (dvals > 0)]
+        if dvals.size == 0:
+            continue
+        r = float(np.median(dvals))
+        temps = thermal[mask]
+        peak = float(temps.max())
+        kind = 'fire' if peak > FIRE_C else 'warm'
+        bearing = yaw + math.atan((cx - cent[k][0]) / fx)
+        out.append(Blob(kind, (x + r * math.cos(bearing), y + r * math.sin(bearing)),
+                        peak if kind == 'fire' else float(np.median(temps)),
+                        r * w / fx, r * h / fx, (u, v, w, h)))
+    return out
+
+
+@dataclass
+class Track:
+    id: int
+    kind: str
+    xy: tuple[float, float]
+    temps: deque
+    hits: deque
+    width_m: float
+    height_m: float
+    breath: float | None = None
+    conf: float = 0.0
+    state: Literal['candidate', 'verify', 'pinned', 'rejected'] = 'candidate'
+    ic: bool | None = None
+    first_seen: float = 0.0
+
+
+def in_view(pose, xy, hfov_deg: float = HFOV_DEG, rng: float = VIEW_RANGE) -> bool:
+    x, y, yaw = pose
+    dx, dy = xy[0] - x, xy[1] - y
+    if math.hypot(dx, dy) > rng:
+        return False
+    d = (math.atan2(dy, dx) - yaw + math.pi) % (2 * math.pi) - math.pi
+    return abs(d) <= math.radians(hfov_deg) / 2
+
+
+class Tracker:
+    def __init__(self, gate_m: float = 0.75):
+        self.tracks: list[Track] = []
+        self.gate = gate_m
+        self._next = 1
+
+    def update(self, blobs: list[Blob], t: float, pose) -> list[Track]:
+        matched = set()
+        for b in blobs:
+            best, bd = None, self.gate
+            for tr in self.tracks:
+                dd = math.dist(tr.xy, b.xy)
+                if tr.kind == b.kind and dd <= bd and tr.id not in matched:
+                    best, bd = tr, dd
+            if best is None:
+                best = Track(self._next, b.kind, b.xy, deque(maxlen=5), deque(maxlen=5),
+                             b.width_m, b.height_m, first_seen=t)
+                self._next += 1
+                self.tracks.append(best)
+            else:
+                best.xy = (0.7 * best.xy[0] + 0.3 * b.xy[0], 0.7 * best.xy[1] + 0.3 * b.xy[1])
+                best.width_m, best.height_m = max(best.width_m, b.width_m), max(best.height_m, b.height_m)
+            best.temps.append(b.temp_c)
+            best.hits.append(True)
+            matched.add(best.id)
+        for tr in self.tracks:
+            if tr.id not in matched and in_view(pose, tr.xy):
+                tr.hits.append(False)
+        return self.tracks
+
+
+def _sigmoid(z):
+    return 1.0 / (1.0 + math.exp(-z))
+
+
+class Calibrator:
+    """Logistic casualty-confidence model; IC feedback = one SGD step (live learning)."""
+
+    def __init__(self, path: str = 'feedback.jsonl', lr: float = 0.5):
+        self.w = np.array([-4.0, 1.5, 1.5, 1.0, 2.0, 3.0])
+        self.path, self.lr = path, lr
+
+    @staticmethod
+    def features(tr: Track) -> np.ndarray:
+        temp = float(np.median(tr.temps)) if tr.temps else 0.0
+        w, h = tr.width_m, max(tr.height_m, 1e-3)
+        return np.array([
+            1.0,
+            1.0 if CAS_LO <= temp <= CAS_HI else 0.0,
+            math.exp(-((max(w, h) - 1.7) / 0.5) ** 2),
+            1.0 if w / h > 1.8 else 0.0,
+            (sum(tr.hits) / len(tr.hits)) if tr.hits else 0.0,
+            tr.breath if tr.breath is not None else 0.5,
+        ])
+
+    def conf(self, tr: Track) -> float:
+        return _sigmoid(float(self.w @ self.features(tr)))
+
+    def update(self, tr: Track, label: bool) -> None:
+        f = self.features(tr)
+        self.w += self.lr * ((1.0 if label else 0.0) - _sigmoid(float(self.w @ f))) * f
+        with open(self.path, 'a', encoding='utf-8') as fh:
+            fh.write(json.dumps({'features': f.round(4).tolist(), 'label': bool(label), 'track': tr.id}) + '\n')
