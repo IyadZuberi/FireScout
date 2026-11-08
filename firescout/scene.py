@@ -73,6 +73,7 @@ class Thing:
     breathing: bool = False
     yaw: float = 0.0
     responsive: bool = False  # conscious casualty: calls for help (heard by the microphones)
+    awake: bool = False       # standing occupant: can be told to evacuate / stay put (moves: mocap body)
     style: str = ''  # visual style: radiator / pipe / pet / ''
 
 
@@ -222,15 +223,17 @@ def generate_layout(seed: int, preset: str = 'care_home', n_casualties: int | No
     hm = human_meta()
     for _ in range(n_casualties):
         size, style = (1.7, 0.5, 0.3), ''
+        awake = bool(rng.random() < 0.4) and 'f_standing' in hm.get('variants', {})
         if hm:  # style = "<sex>_<pose>|<outfit>|<hair>"
             sex = 'm' if rng.random() < 0.5 else 'f'
-            pose = str(rng.choice(['supine', 'prone', 'recovery']))
+            pose = 'standing' if awake else str(rng.choice(['supine', 'prone', 'recovery']))
             sx_, sy_, sz_ = hm['variants'][f'{sex}_{pose}']['size']
             size = (sx_, sy_, sz_)
             style = f'{sex}_{pose}|{sex}{int(rng.integers(2))}|{"grey" if rng.random() < 0.7 else "dark"}'
-        place('casualty', size, float(rng.uniform(34, 37)), near_bed=rng.random() < 0.7,
-              breathing=True, yaw=float(rng.choice([0.0, math.pi]) + rng.uniform(-0.3, 0.3)), style=style,
-              responsive=bool(rng.random() < 0.4))
+        place('casualty', size, float(rng.uniform(34, 37)), near_bed=not awake and rng.random() < 0.7,
+              breathing=True, yaw=float(rng.uniform(-math.pi, math.pi) if awake else
+                                        rng.choice([0.0, math.pi]) + rng.uniform(-0.3, 0.3)), style=style,
+              responsive=awake, awake=awake)
     decoys = [('radiator', (0.08, 0.55, 0.5), float(rng.uniform(45, 60))),
               ('pipe', (1.2, 0.12, 0.12), 70.0),
               ('pet', (0.4, 0.3, 0.3), 38.0)]
@@ -376,10 +379,12 @@ def build_mjcf(layout: Layout) -> str:
         if t.kind == 'fire':
             light = (f'<light name="firelight{i}" type="point" pos="0 0 1.0" diffuse="1.6 0.75 0.15" '
                      f'specular="0.3 0.15 0.05" attenuation="1 0.25 0.5" castshadow="false"/>')
+        mocap = ' mocap="true"' if t.awake else ''  # awake occupants are moved by run.World
+        joint = '' if t.kind == 'casualty' else '<freejoint/>'  # casualties static: posed meshes must not roll
         things.append(
-            f'<body name="thing{i}" pos="{_f(t.xy[0], t.xy[1], 0.01)}" euler="0 0 {math.degrees(t.yaw):.3g}">\n'
-            f'      {"" if t.kind == "casualty" else "<freejoint/>"}\n      {light}\n'
-            f'      {_thing_geoms(i, t, rng, meta)}\n    </body>')  # casualties static: posed meshes must not roll
+            f'<body name="thing{i}" pos="{_f(t.xy[0], t.xy[1], 0.01)}" euler="0 0 {math.degrees(t.yaw):.3g}"{mocap}>\n'
+            f'      {joint}\n      {light}\n'
+            f'      {_thing_geoms(i, t, rng, meta)}\n    </body>')
     smoke = []
     fires = [t.xy for t in layout.things if t.kind == 'fire'] or [(W / 2, H / 2)]
     for k in range(N_SMOKE):

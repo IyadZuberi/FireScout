@@ -203,13 +203,13 @@ class Sensors:
                 continue
             # body = 1.7 m segment along its yaw; the radar beam (0.8 m footprint) must land on some part of it
             c = np.array(self._thing_xy(i))
-            ax = 0.85 * np.array([math.cos(t.yaw), math.sin(t.yaw)])
+            ax = (0.0 if t.awake else 0.85) * np.array([math.cos(t.yaw), math.sin(t.yaw)])  # upright: a point
             tgt = np.array(target)
-            k = float(np.clip(np.dot(tgt - c, ax) / np.dot(ax, ax), -1, 1))
+            k = float(np.clip(np.dot(tgt - c, ax) / max(1e-9, np.dot(ax, ax)), -1, 1))
             if np.linalg.norm(tgt - (c + k * ax)) > 0.8:
                 continue
             r = np.array(rxy)
-            kr = float(np.clip(np.dot(r - c, ax) / np.dot(ax, ax), -1, 1))
+            kr = float(np.clip(np.dot(r - c, ax) / max(1e-9, np.dot(ax, ax)), -1, 1))
             near_pt = tuple(c + kr * ax)  # closest body point to the robot
             if math.dist(rxy, near_pt) <= BREATH_RANGE and (self._los(rxy, near_pt, 0.15) or
                                                             self._los(rxy, near_pt, 0.3)):

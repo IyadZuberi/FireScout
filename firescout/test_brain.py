@@ -330,3 +330,21 @@ def test_depth_edge_tells_furniture_from_wall():
     assert (sem[i - 1:i + 2, j - 1:j + 3] == 2).any()      # furniture
     i, j = b.grid.to_cell(8.0, 4.0)
     assert (sem[i - 2:i + 3, j - 2:j + 3] == 1).any()      # wall (tall, top never seen)
+
+
+def test_speaker_evacuates_when_route_safe_else_shelters():
+    b = Brain(12, 8, (1.0, 4.0))
+    b.grid.occ[:] = 0
+    tr = _pinned(b, (5.0, 4.0), responsive=True)
+    b.step(obs(pose=(3.5, 4.0, 0.0)))
+    assert tr.instruct == 'EVACUATE' and b.say_out and b.say_out[-1]['route']
+    assert b.priority(tr)[0] == 'EVAC' and tr not in b.rescue_order
+
+    b2 = Brain(12, 8, (1.0, 4.0))
+    b2.grid.occ[:] = 0
+    b2.grid.heat[:, 10:13] = 300          # wall of fire between the person and the door (x 2.5-3.25 m)
+    b2.fires = [(2.9, 4.0, 600.0)]
+    tr2 = _pinned(b2, (6.0, 4.0), responsive=True)
+    b2.step(obs(pose=(4.5, 4.0, 0.0)))
+    assert tr2.instruct == 'SHELTER' and b2.say_out[-1]['route'] is None
+    assert any(c.kind == 'SAY' and 'stay put' in c.change for c in b2.cards)

@@ -59,8 +59,26 @@ def _breathing(seconds: float = 6.4, seed: int = 0) -> np.ndarray:
     return 0.9 * x / np.abs(x).max()
 
 
+def _robot_voice(key: str, text: str) -> None:
+    """Robot loudspeaker announcement: a different voice (Zira), clipped band like a small speaker."""
+    raw = os.path.join(DIR, f'_{key}.wav')
+    ps = ("Add-Type -AssemblyName System.Speech; $s=New-Object System.Speech.Synthesis.SpeechSynthesizer; "
+          "$v=$s.GetInstalledVoices()|%{$_.VoiceInfo.Name}|?{$_ -like '*Zira*'}; if($v){$s.SelectVoice($v)}; "
+          "$s.Rate=-1; $f=New-Object System.Speech.AudioFormat.SpeechAudioFormatInfo(22050,"
+          "[System.Speech.AudioFormat.AudioBitsPerSample]::Sixteen,[System.Speech.AudioFormat.AudioChannel]::Mono);"
+          f"$s.SetOutputToWaveFile('{raw}',$f); $s.Speak('{text}'); $s.Dispose()")
+    subprocess.run(['powershell', '-NoProfile', '-Command', ps], check=True)
+    x = _load(raw)
+    os.remove(raw)
+    x = _lowpass(x, 2) - _lowpass(x, 40)  # tinny loudspeaker band
+    _save(os.path.join(DIR, f'{key}.wav'), 0.95 * x / max(1e-6, np.abs(x).max()))
+
+
 def build() -> None:
     os.makedirs(DIR, exist_ok=True)
+    from brain import SAY_TEXT
+    _robot_voice('robot_evac', SAY_TEXT['EVACUATE'])
+    _robot_voice('robot_shelter', SAY_TEXT['SHELTER'])
     for key, (text, pitch, rate) in PHRASES.items():
         raw = os.path.join(DIR, f'_{key}.wav')
         ssml = (f"<speak version='1.0' xml:lang='en-GB'><prosody pitch='{pitch}' rate='{rate}'>{text}"

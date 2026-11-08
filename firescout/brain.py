@@ -219,8 +219,9 @@ def detect_blobs(thermal, depth, pose, hfov_deg: float = HFOV_DEG) -> list[Blob]
         else:
             r = float(np.median(dvals))
         bearing = yaw + math.atan((cx - cent[k][0]) / fx)
-        if kind == 'warm' and (r * h / fx > 1.0 or r * w / fx > 2.5):
-            continue  # wall-sized warm patch, not a collapsed person
+        hm, wm = r * h / fx, r * w / fx
+        if kind == 'warm' and (wm > 2.5 or (hm > 1.0 and not (hm <= 2.0 and wm <= 0.9))):
+            continue  # wall-sized warm patch: neither a collapsed nor an upright person
         out.append(Blob(kind, (x + r * math.cos(bearing), y + r * math.sin(bearing)),
                         peak if kind == 'fire' else float(np.median(temps)),
                         r * w / fx, r * h / fx, (u, v, w, h)))
@@ -244,6 +245,7 @@ class Track:
     breath_n: int = 0
     responsive: bool = False   # heard calling (mic bearing matched this track)
     verify_tries: int = 0
+    instruct: str | None = None   # 'EVACUATE' | 'SHELTER' once the robot has spoken to this person
     verify_from: tuple | None = None  # where the last breath check was taken from
     priority: str = ''
 
@@ -367,6 +369,15 @@ FAST_SPEED = 0.7          # known, scanned, cool route: move fast
 VOICE_MATCH_RAD = 0.35    # mic bearing within this of a warm track = that person is calling
 VOICE_MEMORY_S = 25.0
 WALL_Z, FURN_MIN_Z = 1.4, 0.1
+SPEAKER_RANGE = 5.0       # m: a 10 W speaker is understood through smoke at this range
+EVAC_MAX_C = 60.0         # a walking civilian's route must stay below this (measured) temperature
+EVAC_FIRE_CLEARANCE = 1.5
+SAY_TEXT = {
+    'EVACUATE': 'This is the fire service. Stay low, keep one hand on the wall and walk out the way I came in. '
+                'Firefighters are at the door.',
+    'SHELTER': 'This is the fire service. Stay where you are. Get low, cover your mouth and keep the door shut. '
+               'Firefighters are coming to you.',
+}
 
 
 @dataclass
@@ -460,6 +471,7 @@ class Brain:
         self.speed_why = ''
         self.rescue_order: list[Track] = []
         self._last_hear = -99.0
+        self.say_out: list[dict] = []   # speaker instructions for the world (sim) to deliver
         ys, xs = np.mgrid[0:self.grid.rows, 0:self.grid.cols]
         self._cx, self._cy = (xs + 0.5) * RES, (ys + 0.5) * RES
 
@@ -532,6 +544,8 @@ class Brain:
             why.append(f'O2 {o2:.1f}%')
         hazard = bool(why)
         why.append('calling out' if tr.responsive else 'no voice heard')
+        if tr.instruct == 'EVACUATE':
+            return 'EVAC', 5.0, 'told to walk out: expect at entry, ' + ', '.join(why)
         if tr.state != 'pinned':
             label, base = 'P?', 50.0
         elif not tr.responsive or hazard:
@@ -729,7 +743,8 @@ class Brain:
                 tr.priority = label
                 self.emit('PRIORITY', 'thermal+radar+mic+gas', f'casualty#{tr.id} {label}: {why}',
                           'rescue order updated', 'rescue-priority')
-        ranked = sorted(pinned, key=lambda t: -self.priority(t)[1])[:4]
+        self._instruct(cost, here)
+        ranked = sorted([t for t in pinned if t.instruct != 'EVACUATE'], key=lambda t: -self.priority(t)[1])[:4]
         visit, cur, path = [], here, [here]
         for tr in ranked:
             tgt = self._near(tr.xy, dist) or self.grid.to_cell(*tr.xy)
@@ -743,6 +758,27 @@ class Brain:
             cur = tgt
         self.rescue_order = visit
         self.rescue = (list(range(len(visit))), path) if visit else None
+
+    def _instruct(self, cost, here) -> None:
+        """Talk to conscious people in speaker range: walk out if the measured route is survivable, else stay put."""
+        g = self.grid
+        rxy = g.to_world(*here)
+        for tr in self.tracker.tracks:
+            if (tr.kind != 'warm' or not tr.responsive or tr.instruct or tr.state == 'rejected'
+                    or tr.conf < VERIFY_CONF or math.dist(rxy, tr.xy) > SPEAKER_RANGE):
+                continue
+            route = astar(cost, g.to_cell(*tr.xy), self.start_cell)
+            hot = max((float(g.heat[c]) for c in route), default=999.0) if route else 999.0
+            near_fire = min((math.dist(g.to_world(*c), f[:2]) for c in (route or []) for f in self.fires), default=99.0)
+            safe = route is not None and hot <= EVAC_MAX_C and near_fire >= EVAC_FIRE_CLEARANCE
+            tr.instruct = 'EVACUATE' if safe else 'SHELTER'
+            detail = (f'person#{tr.id} conscious; way out {len(route) * RES:.1f}m, max {hot:.0f}C, '
+                      f'{near_fire:.1f}m from fire') if route else f'person#{tr.id} conscious; no known way out'
+            self.emit('SAY', 'mic+thermal', detail,
+                      'told to walk out' if safe else 'told to stay put + stay low; crew priority',
+                      'evacuate-if-route-safe' if safe else 'shelter-if-route-unsafe')
+            self.say_out.append({'track': tr.id, 'kind': tr.instruct, 'text': SAY_TEXT[tr.instruct], 'xy': tr.xy,
+                                 'route': [g.to_world(*c) for c in route] if safe else None})
 
     def _plan(self, obs, cost, dist, parent, here) -> Command:
         g = self.grid

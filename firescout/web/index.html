@@ -1,0 +1,156 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FireScout IC Console</title>
+<link rel="stylesheet" href="style.css">
+<script type="importmap">
+{ "imports": { "three": "./vendor/three/three.module.js", "three/addons/": "./vendor/three/addons/" } }
+</script>
+</head>
+<body>
+<header>
+  <div class="brand"><span class="logo"></span>FireScout <small>IC Console</small></div>
+  <div class="chips">
+    <span class="chip" id="c-building">-</span>
+    <span class="chip big" id="c-clock">T+00:00</span>
+    <span class="chip" id="c-crew">crew in 150s</span>
+    <span class="chip" id="c-mode">-</span>
+    <span class="chip" id="c-radio">-</span>
+  </div>
+  <div class="actions">
+    <button id="b-robot">Robot &amp; agent</button>
+    <button id="b-new" class="primary">New scenario</button>
+    <button id="b-sound">Sound: off</button>
+  </div>
+</header>
+
+<main>
+  <aside id="left">
+    <section>
+      <h3>Rescue priority <span class="hint">for the BA crew, not clinical triage</span></h3>
+      <div id="casualties"><div class="muted">searching...</div></div>
+    </section>
+    <section>
+      <h3>Hazards</h3>
+      <div class="kv"><span>Fire seats</span><b id="h-fires">-</b></div>
+      <div class="kv"><span>Air at robot</span><b id="h-air">-</b></div>
+      <div class="kv"><span>Robot health</span><b id="h-health">-</b></div>
+      <div class="kv"><span>Microphones</span><b id="h-mic">listening</b></div>
+    </section>
+    <section>
+      <h3>Agent</h3>
+      <div class="kv"><span>Speed</span><b id="a-speed">-</b></div>
+      <div class="kv"><span>Floor searched</span><b id="a-cov">-</b></div>
+      <div class="kv"><span>First casualty</span><b id="a-first">-</b></div>
+      <div class="kv"><span>Brain loop (on robot)</span><b id="a-lat">-</b></div>
+      <div class="kv"><span>Map vs true plan</span><b id="a-map">-</b></div>
+      <div class="kv eval"><span>Ground truth (eval)</span><b id="a-truth">-</b></div>
+    </section>
+    <section>
+      <h3>Incident Commander</h3>
+      <div class="grid2">
+        <button data-a="stop" class="warn">STOP robot</button>
+        <button data-a="resume">RESUME autonomy</button>
+        <button data-a="recall">RECALL to entry</button>
+        <button data-a="radio">Radio drop</button>
+        <button data-a="person_yes">Candidate = person</button>
+        <button data-a="person_no">Not a person</button>
+        <button data-a="ignite_shelf" class="fire">Ignite shelf</button>
+        <button data-a="ignite_random" class="fire">Ignite object</button>
+      </div>
+      <div class="sub">Search this room first</div>
+      <div id="rooms" class="grid2"></div>
+      <div id="msg" class="msg"></div>
+    </section>
+  </aside>
+
+  <div id="stage">
+    <canvas id="view"></canvas>
+    <div id="labels"></div>
+    <div class="viewbar">
+      <button data-v="over" class="on">Overview</button>
+      <button data-v="follow">Follow robot</button>
+      <button data-v="eye">Robot's eye</button>
+      <button id="t-smoke" class="on">Smoke</button>
+      <button id="t-truth">True plan</button>
+    </div>
+    <div class="legend">
+      <span><i style="background:#2ee6ff"></i>robot's next move</span>
+      <span><i style="background:#38ff7a"></i>crew route, priority order</span>
+      <span><i style="background:#ffffff"></i>exit / retreat route</span>
+      <span><i style="background:#ff4a3a"></i>fire no-go zone</span>
+      <span><i style="background:#ff7cff"></i>voice heard</span>
+    </div>
+    <div id="banner"></div>
+  </div>
+
+  <aside id="right">
+    <section>
+      <div class="tabs" id="feedtabs">
+        <button data-f="thermal" class="on">Thermal</button>
+        <button data-f="night">Night vision (IR)</button>
+        <button data-f="colour">Colour camera</button>
+      </div>
+      <div class="feed"><img id="feed" src="/feed/thermal.jpg" alt="robot camera"><span id="feedcap">LWIR thermal 160x120, sees through smoke</span></div>
+    </section>
+    <section>
+      <h3>Robot-built map <span class="hint">radar + depth, no floor plan given</span></h3>
+      <div class="feed"><canvas id="mapc"></canvas></div>
+      <div class="hint" id="maplegend">white = walls it found · brown = furniture · magenta = true plan (hidden from robot)</div>
+    </section>
+    <section class="grow">
+      <h3>Decision log <span class="hint">every action + the sensor reading behind it</span></h3>
+      <div id="log"></div>
+    </section>
+    <section>
+      <h3>METHANE <span class="hint">auto sitrep</span></h3>
+      <div id="methane"></div>
+    </section>
+  </aside>
+</main>
+
+<dialog id="d-new">
+  <h2>New scenario</h2>
+  <label>Building <select id="n-preset"></select></label>
+  <label>Casualties <input id="n-cas" type="number" min="0" max="4" value="3"></label>
+  <label>Fires <input id="n-fires" type="number" min="1" max="3" value="2"></label>
+  <label>Layout seed <input id="n-seed" type="number" min="0" max="9999" value="5"></label>
+  <div class="row"><button id="n-cancel">Cancel</button><button id="n-go" class="primary">Start mission</button></div>
+</dialog>
+
+<dialog id="d-robot">
+  <div class="robotwrap">
+    <div><canvas id="robotc"></canvas><div class="hint">drag to rotate</div></div>
+    <div class="spec">
+      <h2>FireScout scout robot</h2>
+      <p>Placed at the doorway by the first crew while BA is donned. Searches ahead in zero visibility and tells the
+        Incident Commander where people are, how urgent each one is, where the fire is and which way is safe.</p>
+      <table>
+        <tr><td><b class="s1">Thermal camera</b></td><td>LWIR 160x120, 57 deg (FLIR Lepton 3.5) - finds bodies + fire through smoke</td></tr>
+        <tr><td><b class="s2">60 GHz radar</b></td><td>360 deg ranging for mapping walls; breathing micro-motion to 3 m</td></tr>
+        <tr><td><b class="s3">Depth + IR night camera</b></td><td>850 nm illuminator; tells furniture from walls by object height</td></tr>
+        <tr><td><b class="s4">4-mic array</b></td><td>hears calls for help, gives direction of the voice</td></tr>
+        <tr><td><b class="s5">Speaker</b></td><td>talks to people it finds: stay low, stay put, or which way is out</td></tr>
+        <tr><td><b class="s6">Gas cells</b></td><td>CO + O2 (4-gas monitor cells) - marks air that kills</td></tr>
+        <tr><td><b class="s7">Self temperature</b></td><td>retreats before electronics cook (60 C limit)</td></tr>
+        <tr><td><b class="s8">Mesh radio</b></td><td>keeps working with no link, uploads when back in range</td></tr>
+      </table>
+      <h3>The agent (runs on the robot, nothing to phone home to)</h3>
+      <div class="pipe">
+        <div><b>Perceive</b>thermal, radar, depth, mics, gas</div>
+        <div><b>Understand</b>map, walls vs furniture, people vs decoys, fire</div>
+        <div><b>Decide</b>safety &gt; IC order &gt; check person &gt; follow voice &gt; explore</div>
+        <div><b>Act</b>drive, talk to people, routes + METHANE to IC</div>
+        <div><b>Learn</b>IC confirm / reject updates its person detector</div>
+      </div>
+      <p class="hint">Reference build ~GBP 1.3-2.3k, 3-5 kg, tracked, IP54, 40 min battery. Brain loop 3 ms median on a laptop CPU (Jetson Orin Nano class on the robot).</p>
+      <div class="row"><button id="r-close" class="primary">Close</button></div>
+    </div>
+  </div>
+</dialog>
+
+<script type="module" src="app.js"></script>
+</body>
+</html>

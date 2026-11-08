@@ -6,7 +6,7 @@ Run once: python humans.py "<path to 'Base Characters/Godot - UE'>"
 from __future__ import annotations
 
 import json
-
+import math
 import sys
 from pathlib import Path
 
@@ -37,8 +37,11 @@ class Gltf:
         self.bin = (path.parent / self.g['buffers'][0]['uri']).read_bytes()
         self.parent = {c: i for i, n in enumerate(self.g['nodes']) for c in n.get('children', [])}
         self.names = {n.get('name'): i for i, n in enumerate(self.g['nodes'])}
+        self.override: dict[int, np.ndarray] = {}  # accessor index -> replacement data (e.g. loosened clothes)
 
     def acc(self, i):
+        if i in self.override:
+            return self.override[i]
         a = self.g['accessors'][i]
         v = self.g['bufferViews'][a['bufferView']]
         n, dt = NC[a['type']], CT[a['componentType']]
@@ -120,9 +123,25 @@ POSES = {
     'recovery': {'upperarm_r': _p(('z', 55), ('x', 75)), 'lowerarm_r': _p(('z', -60)),
                  'upperarm_l': _p(('z', -25), ('x', 85)), 'thigh_r': _p(('x', -75)), 'calf_r': _p(('x', 95)),
                  'thigh_l': _p(('x', -15)), 'calf_l': _p(('x', 25))},
+    'standing': {'upperarm_l': _p(('z', -76)), 'upperarm_r': _p(('z', 76)),
+                 'lowerarm_l': _p(('x', 15)), 'lowerarm_r': _p(('x', 15))},
+    'kneel': {'upperarm_l': _p(('z', -70), ('x', 25)), 'upperarm_r': _p(('z', 70), ('x', 25)),
+              'lowerarm_l': _p(('x', 40)), 'lowerarm_r': _p(('x', 40)),
+              'thigh_l': _p(('x', -20)), 'thigh_r': _p(('x', -20)), 'calf_l': _p(('x', 105)), 'calf_r': _p(('x', 105))},
 }
+for _k in range(4):  # 4-frame walk cycle (stooped slightly: staying low under smoke)
+    _ph = math.sin(_k * math.pi / 2)
+    _pc = math.cos(_k * math.pi / 2)
+    POSES[f'walk{_k}'] = {
+        'upperarm_l': _p(('z', -74), ('x', 22 * _ph)), 'upperarm_r': _p(('z', 74), ('x', -22 * _ph)),
+        'lowerarm_l': _p(('x', 25)), 'lowerarm_r': _p(('x', 25)),
+        'thigh_l': _p(('x', -26 * _ph)), 'thigh_r': _p(('x', 26 * _ph)),
+        'calf_l': _p(('x', 10 + 30 * max(0.0, -_pc))), 'calf_r': _p(('x', 10 + 30 * max(0.0, _pc))),
+        'spine_02': _p(('x', 12))}
+UPRIGHT = ('standing', 'kneel') + tuple(f'walk{k}' for k in range(4))
 # glTF (x=left, y=up, z=front) -> world with the body lying along +x (head at +x). Rows = world axes.
 ORIENT = {
+    **{k: np.array([[0, 0, 1], [1, 0, 0], [0, 1, 0]], float) for k in UPRIGHT},  # upright, facing +x
     'supine': np.array([[0, 1, 0], [-1, 0, 0], [0, 0, 1]], float),    # front faces up
     'prone': np.array([[0, 1, 0], [1, 0, 0], [0, 0, -1]], float),     # front faces down
     'recovery': np.array([[0, 1, 0], [0, 0, -1], [-1, 0, 0]], float),  # lying on the left side, facing -y
@@ -133,7 +152,7 @@ FEET = ('foot', 'ball')
 OUTFITS = {  # (top rgb, bottom rgb, sock rgb): nightwear / day clothes seen in care homes
     'm0': ((0.42, 0.52, 0.66), (0.2, 0.24, 0.34), (0.35, 0.33, 0.3)),
     'm1': ((0.52, 0.2, 0.22), (0.45, 0.45, 0.43), (0.2, 0.2, 0.22)),
-    'f0': ((0.8, 0.62, 0.7), (0.8, 0.62, 0.7), (0.85, 0.82, 0.78)),
+    'f0': ((0.3, 0.34, 0.48), (0.3, 0.34, 0.48), (0.7, 0.68, 0.65)),  # navy dressing gown
     'f1': ((0.55, 0.5, 0.7), (0.22, 0.22, 0.28), (0.3, 0.28, 0.3)),
 }
 HAIR = {'grey': (0.78, 0.77, 0.74), 'dark': (0.3, 0.22, 0.16)}
@@ -170,9 +189,37 @@ def paint_texture(src_png: Path, uv, F, cls, outfit, size=1024):
     return Image.fromarray((out * 255).astype(np.uint8))
 
 
+def loosen(g: Gltf, prim: dict, cls: np.ndarray, iters: int = 30, inflate: float = 0.022) -> None:
+    """Clothes hang loose: smooth away body contours under the clothing (Laplacian on welded vertices) and push
+    the cloth out a little. Writes the result as an accessor override, so every pose uses it."""
+    at = prim['attributes']
+    P = g.acc(at['POSITION']).astype(float)
+    N = g.acc(at['NORMAL']).astype(float)
+    F = g.acc(prim['indices']).reshape(-1, 3)
+    key = np.round(P / 1e-4).astype(np.int64)
+    _, weld = np.unique(key, axis=0, return_inverse=True)
+    weld = weld.ravel()
+    n = weld.max() + 1
+    Q = np.zeros((n, 3))
+    np.add.at(Q, weld, P)
+    Q /= np.bincount(weld, minlength=n)[:, None]
+    e = np.concatenate([weld[F[:, [0, 1]]], weld[F[:, [1, 2]]], weld[F[:, [2, 0]]]])
+    e = np.concatenate([e, e[:, ::-1]])
+    deg = np.bincount(e[:, 0], minlength=n).astype(float)
+    cloth = np.zeros(n, bool)
+    cloth[weld[cls > 0]] = True
+    for _ in range(iters):
+        avg = np.zeros((n, 3))
+        np.add.at(avg, e[:, 0], Q[e[:, 1]])
+        avg /= np.maximum(deg, 1)[:, None]
+        Q[cloth] = 0.5 * Q[cloth] + 0.5 * avg[cloth]
+    out = Q[weld] + inflate * N * (cls > 0)[:, None]
+    g.override[at['POSITION']] = out.astype(np.float32)
+
+
 def write_obj(path: Path, V, uv, F):
     with open(path, 'w') as fh:
-        fh.write(''.join(f'v {x:.4f} {y:.4f} {z:.4f}\n' for x, y, z in V))
+        fh.write(''.join(f'v {x:.3f} {y:.3f} {z:.3f}\n' for x, y, z in V))
         fh.write(''.join(f'vt {u:.5f} {1 - v:.5f}\n' for u, v in uv))
         fh.write(''.join(f'f {a + 1}/{a + 1} {b + 1}/{b + 1} {c + 1}/{c + 1}\n' for a, b, c in F))
 
@@ -186,6 +233,8 @@ def build(base: Path, hair_dir: Path, out: Path = OUT) -> dict:
         bp = next(p for m in body.g['meshes'] for p in m['primitives']
                   if body.g['materials'][p['material']]['name'].startswith('MI_Superhero'))
         cls = vertex_class(body, bp['attributes'])
+        loosen(body, bp, cls)
+        stand_shift = None
         for pose_name, pose in POSES.items():
             parts = [p for p in body.skinned(pose) if p[0].startswith('MI_Superhero')]
             parts += [('hair',) + p[1:] for p in hair.skinned(pose)]
@@ -193,6 +242,9 @@ def build(base: Path, hair_dir: Path, out: Path = OUT) -> dict:
             allV = np.vstack([p[1] for p in parts]) @ R.T
             lo, hi = allV.min(0), allV.max(0)
             shift = np.array([(lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2, lo[2]])
+            if pose_name in UPRIGHT:  # one origin for all upright frames (feet centre), so animation does not jitter
+                stand_shift = stand_shift if stand_shift is not None else shift
+                shift = np.array([stand_shift[0], stand_shift[1], lo[2]])
             for name, V, uv, F, img in parts:
                 key = f'human_{sex}_{pose_name}' + ('_hair' if name == 'hair' else '')
                 write_obj(out / f'{key}.obj', V @ R.T - shift, uv, F)

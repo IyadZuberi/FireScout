@@ -141,6 +141,49 @@ class World:
         self.smoke_size = [m.geom_size[m.body_geomadr[b]].copy() for b in self.smoke]
         self.rng = np.random.default_rng(L.seed)
         self.next_spread = SPREAD_EVERY
+        # awake occupants: 'stand' -> told 'walk' (along the robot's safe route) -> 'out', or 'kneel' (stay put)
+        self.occ = {i: {'mode': 'stand', 'path': None, 'k': 0, 'yaw': t.yaw,
+                        'mocap': m.body_mocapid[s.thing_body[i]]} for i, t in enumerate(L.things) if t.awake}
+        self.evacuated = 0
+        self._t_last = 0.0
+
+    def speak(self, say: dict, robot_xy) -> int | None:
+        """Robot speaker reaches the awake occupant nearest the addressed track (if within earshot)."""
+        best = min(self.occ, key=lambda i: math.dist(self.s._thing_xy(i), say['xy']), default=None)
+        if best is None or math.dist(self.s._thing_xy(best), say['xy']) > 1.6 or \
+                math.dist(self.s._thing_xy(best), robot_xy) > 6.0 or self.occ[best]['mode'] != 'stand':
+            return None
+        o = self.occ[best]
+        if say['kind'] == 'EVACUATE' and say['route']:
+            o['mode'], o['path'], o['k'] = 'walk', [self.s._thing_xy(best)] + list(say['route']), 1
+        else:
+            o['mode'] = 'kneel'
+        return best
+
+    def move_people(self, t: float):
+        dt, self._t_last = max(0.0, t - self._t_last), t
+        for i, o in self.occ.items():
+            if o['mode'] != 'walk':
+                continue
+            p = self.d.mocap_pos[o['mocap']]
+            step = 0.5 * dt  # stooped walk in smoke
+            while step > 0 and o['k'] < len(o['path']):
+                tx, ty = o['path'][o['k']]
+                dx, dy = tx - p[0], ty - p[1]
+                dd = math.hypot(dx, dy)
+                if dd <= step:
+                    p[0], p[1], step, o['k'] = tx, ty, step - dd, o['k'] + 1
+                else:
+                    p[0] += dx / dd * step
+                    p[1] += dy / dd * step
+                    o['yaw'] = math.atan2(dy, dx)
+                    step = 0
+            q = self.d.mocap_quat[o['mocap']]
+            q[:] = [math.cos(o['yaw'] / 2), 0, 0, math.sin(o['yaw'] / 2)]
+            if o['k'] >= len(o['path']):  # reached the entry: handed to the crew outside
+                o['mode'] = 'out'
+                p[:] = [-3.0 - self.evacuated, -3.0, 0.0]
+                self.evacuated += 1
 
     def growth(self, i: int) -> float:
         return min(1.0, max(0.0, (self.d.time - self.t_lit[i]) / FIRE_GROW_S)) if i in self.t_lit else 0.0
@@ -171,6 +214,7 @@ class World:
                 self.m.geom_size[g] = base * np.array([k, k, 1.0])
 
     def animate(self, t: float):
+        self.move_people(t)
         for i, lid in self.lights.items():
             self.m.light_diffuse[lid] = self.base_diffuse[i] * (1 + 1.2 * self.growth(i)) * \
                 (0.7 + 0.3 * math.sin(t * 17 + i) * self.rng.random())
@@ -604,6 +648,16 @@ def main(seed: int = 11, use_rerun: bool = False, save: str | None = None, ignit
             tm.append(time.perf_counter())
             world.grow()
             msg = world.spread() or msg
+            with w.lock:
+                says, w.b.say_out = w.b.say_out, []
+            for sy in says:  # robot loudspeaker -> occupant walks out / stays put
+                world.speak(sy, w.s._robot_xy())
+                msg = f'ROBOT SPEAKER to #{sy["track"]}: {"walk out" if sy["kind"] == "EVACUATE" else "stay put"}'
+                if player.on:
+                    player.ws.PlaySound(audio.os.path.join(audio.DIR, 'robot_evac.wav' if sy['kind'] == 'EVACUATE'
+                                                           else 'robot_shelter.wav'),
+                                        player.ws.SND_FILENAME | player.ws.SND_ASYNC)
+                    player.busy_until = time.monotonic() + 7
             if ignite_shelf_at is not None and d.time >= ignite_shelf_at:
                 msg, ignite_shelf_at = world.ignite(shelf) or msg, None
             pip, texts, vstate = None, None, None
