@@ -194,3 +194,6 @@ dialog h2 { font-size: 20px; }
 .s5 { color: var(--person); } .s6 { color: #b4a7ff; } .s7 { color: var(--fire); } .s8 { color: #7fd1ff; }
 
 @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
+.lbl.pin { font-size: 15px; padding: 6px 11px; box-shadow: 0 4px 14px rgba(0,0,0,.55); }
+.lbl.pin.fire { font-weight: 700; letter-spacing: .02em; }
+.lbl.spec { background: rgba(15,15,16,.88); border: 1px solid var(--line-2); font-weight: 500; }

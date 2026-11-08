@@ -181,46 +181,87 @@ class Fire {
 
 // ------------------------------------------------------------------ robot model (shared with the showcase)
 export function buildRobot(withLabels = false) {
+  // Portable tracked scout in the style of fielded fire / EOD crawlers: low armoured hull on rubber tracks with
+  // front flippers, aluminium heat shield, carry handle, pan-tilt sensor head on a short mast. Dimensions in metres
+  // (hull 0.46 x 0.26 x 0.12, ~9 kg class).
   const g = new THREE.Group();
-  const M = (c, o = {}) => new THREE.MeshStandardMaterial({ color: c, roughness: 0.45, metalness: 0.35, ...o });
-  const box = (sx, sy, sz, m, x, y, z) => { const b = new THREE.Mesh(new THREE.BoxGeometry(sx, sy, sz), m); b.position.set(x, y, z); b.castShadow = true; g.add(b); return b; };
-  const cyl = (r, h, m, x, y, z, axis = 'z') => {
-    const c = new THREE.Mesh(new THREE.CylinderGeometry(r, r, h, 24), m);
-    if (axis === 'z') c.rotation.x = Math.PI / 2; else if (axis === 'x') c.rotation.z = Math.PI / 2;
-    c.position.set(x, y, z); c.castShadow = true; g.add(c); return c;
+  const M = (c, o = {}) => new THREE.MeshStandardMaterial({ color: c, roughness: 0.55, metalness: 0.25, ...o });
+  const add = (geo, mat, x, y, z, rx = 0, ry = 0, rz = 0) => {
+    const m = new THREE.Mesh(geo, mat); m.position.set(x, y, z); m.rotation.set(rx, ry, rz);
+    m.castShadow = m.receiveShadow = true; g.add(m); return m;
   };
-  const red = M(0xc4231a), dark = M(0x1d1f24, { roughness: 0.8 }), white = M(0xe9e9e4), black = M(0x050506, { roughness: 0.2 });
-  box(0.42, 0.24, 0.11, red, 0, 0, 0.1);                       // chassis (heat-shielded shell)
-  box(0.34, 0.2, 0.02, dark, -0.02, 0, 0.165);                  // deck
-  for (const s of [-1, 1]) {                                     // tracks with treads
-    box(0.46, 0.075, 0.1, dark, 0, 0.165 * s, 0.056);
-    for (let k = 0; k < 12; k++) box(0.02, 0.08, 0.012, M(0x0c0c0e), -0.21 + k * 0.038, 0.165 * s, 0.108);
+  const box = (sx, sy, sz, mat, x, y, z, rx, ry, rz) => add(new THREE.BoxGeometry(sx, sy, sz), mat, x, y, z, rx, ry, rz);
+  const cylY = (r, h, mat, x, y, z, seg = 24) => add(new THREE.CylinderGeometry(r, r, h, seg), mat, x, y, z);          // axis = y
+  const cylX = (r, h, mat, x, y, z, seg = 24) => add(new THREE.CylinderGeometry(r, r, h, seg), mat, x, y, z, 0, 0, Math.PI / 2);
+  const cylZ = (r, h, mat, x, y, z, seg = 24) => add(new THREE.CylinderGeometry(r, r, h, seg), mat, x, y, z, Math.PI / 2, 0, 0);
+
+  const hull = M(0x464a50, { roughness: 0.55, metalness: 0.35 });            // powder-coated graphite
+  const alu = M(0xb9bcc0, { roughness: 0.32, metalness: 0.9 });             // heat-shield plate
+  const rubber = M(0x111112, { roughness: 0.95, metalness: 0 });
+  const steel = M(0x5b5f64, { roughness: 0.4, metalness: 0.8 });
+  const hiVis = M(0xff7a1a, { roughness: 0.5, metalness: 0.1 });            // fire-service orange
+  const reflect = M(0xd9ff3a, { roughness: 0.3, emissive: 0x1a2200 });      // retro-reflective band
+  const glass = M(0x0a0a0c, { roughness: 0.05, metalness: 0.9 });
+  const gold = M(0xc8a24a, { roughness: 0.3, metalness: 1 });
+
+  // tracks: rubber belt (stadium shape) with cleats, drive sprocket, idler and road wheels
+  for (const s of [-1, 1]) {
+    const y = 0.155 * s;
+    box(0.4, 0.07, 0.1, rubber, 0, y, 0.06);
+    cylY(0.05, 0.07, rubber, 0.2, y, 0.06); cylY(0.05, 0.07, rubber, -0.2, y, 0.06);
+    for (let k = 0; k < 16; k++) box(0.012, 0.072, 0.008, M(0x1d1d1f), -0.19 + k * 0.025, y, 0.112);
+    for (const x of [-0.2, 0.2]) cylY(0.032, 0.074, steel, x, y, 0.06, 12);
+    for (const x of [-0.1, 0, 0.1]) cylY(0.026, 0.074, steel, x, y, 0.045, 12);
+    // front flippers (tilted up) - climb door sills and debris
+    const fl = new THREE.Group(); fl.position.set(0.2, y + 0.06 * s, 0.06); fl.rotation.y = -0.45;
+    const b1 = new THREE.Mesh(new THREE.BoxGeometry(0.2, 0.035, 0.06), rubber); b1.position.x = 0.1; b1.castShadow = true;
+    const w1 = new THREE.Mesh(new THREE.CylinderGeometry(0.03, 0.03, 0.04, 12), hiVis); w1.position.x = 0.2;
+    fl.add(b1, w1); g.add(fl);
   }
-  cyl(0.02, 0.15, dark, 0.06, 0, 0.25);                          // mast
-  box(0.1, 0.16, 0.07, white, 0.08, 0, 0.33);                    // sensor head
-  const lens = cyl(0.024, 0.02, black, 0.135, 0.035, 0.33, 'x');  // thermal camera
-  cyl(0.03, 0.006, M(0xff8a3d, { emissive: 0x552200 }), 0.128, 0.035, 0.33, 'x');
-  box(0.008, 0.06, 0.05, M(0xf4f4f4), 0.133, -0.035, 0.33);      // 60 GHz radar panel
-  for (let k = 0; k < 6; k++) {                                  // 850 nm IR illuminator ring
+  // hull: lower body + bevelled upper deck
+  box(0.42, 0.24, 0.08, hull, 0, 0, 0.1);
+  box(0.36, 0.22, 0.035, hull, -0.01, 0, 0.155, 0, 0, 0);
+  box(0.06, 0.22, 0.05, hull, 0.205, 0, 0.13, 0, 0.6, 0);                  // sloped glacis
+  box(0.3, 0.2, 0.006, alu, -0.03, 0, 0.176);                                // heat-shield top plate
+  for (const s of [-1, 1]) box(0.34, 0.004, 0.018, reflect, 0, 0.121 * s, 0.11);  // reflective side bands
+  box(0.004, 0.16, 0.03, hiVis, -0.211, 0, 0.115);                           // rear orange panel
+  // carry handle (crew places it at the doorway)
+  for (const x of [-0.12, 0.04]) cylZ(0.008, 0.06, steel, x, 0, 0.21, 10);
+  cylX(0.009, 0.17, steel, -0.04, 0, 0.24, 10);
+  // mast + pan-tilt sensor head
+  cylZ(0.022, 0.16, steel, 0.11, 0, 0.26, 16);
+  const head = new THREE.Group(); head.position.set(0.12, 0, 0.36); g.add(head);
+  const hb = new THREE.Mesh(new THREE.BoxGeometry(0.09, 0.17, 0.075), M(0x26282b, { roughness: 0.45, metalness: 0.4 })); hb.castShadow = true; head.add(hb);
+  const visor = new THREE.Mesh(new THREE.BoxGeometry(0.004, 0.15, 0.055), glass); visor.position.x = 0.047; head.add(visor);
+  const lens = new THREE.Mesh(new THREE.CylinderGeometry(0.022, 0.022, 0.012, 24), M(0x1a1410, { roughness: 0.1, metalness: 0.95 }));
+  lens.rotation.z = Math.PI / 2; lens.position.set(0.052, 0.04, 0.005); head.add(lens);                       // germanium LWIR window
+  const rim = new THREE.Mesh(new THREE.TorusGeometry(0.024, 0.003, 8, 24), gold); rim.rotation.y = Math.PI / 2; rim.position.set(0.055, 0.04, 0.005); head.add(rim);
+  const radar = new THREE.Mesh(new THREE.BoxGeometry(0.006, 0.05, 0.045), M(0xeeeeea, { roughness: 0.7 })); radar.position.set(0.05, -0.045, 0); head.add(radar);
+  const depth = new THREE.Mesh(new THREE.BoxGeometry(0.006, 0.07, 0.014), glass); depth.position.set(0.05, 0, 0.03); head.add(depth);
+  for (let k = 0; k < 6; k++) {                                                                            // 850 nm IR ring
     const a = k / 6 * 6.283;
-    const led = new THREE.Mesh(new THREE.SphereGeometry(0.005), M(0x330000, { emissive: 0xff2010, emissiveIntensity: 1.5 }));
-    led.position.set(0.137, 0.035 + 0.034 * Math.cos(a), 0.33 + 0.034 * Math.sin(a)); g.add(led);
+    const led = new THREE.Mesh(new THREE.SphereGeometry(0.004), M(0x330000, { emissive: 0xff2010, emissiveIntensity: 1.4 }));
+    led.position.set(0.054, 0.04 + 0.032 * Math.cos(a), 0.005 + 0.032 * Math.sin(a)); head.add(led);
   }
-  cyl(0.012, 0.02, black, 0.13, -0.035, 0.375);                  // depth camera
-  for (const [x, y] of [[0.14, 0.1], [0.14, -0.1], [-0.14, 0.1], [-0.14, -0.1]]) cyl(0.008, 0.02, black, x, y, 0.18); // 4 mics
-  cyl(0.035, 0.008, M(0x2a2d33), -0.09, 0, 0.18);               // speaker
-  cyl(0.026, 0.009, M(0x111215), -0.09, 0, 0.181);
-  cyl(0.012, 0.03, M(0x6c5ce7), 0.0, 0.125, 0.12, 'y');          // gas cells (CO + O2) vent
-  const beacon = new THREE.Mesh(new THREE.SphereGeometry(0.022, 16, 12), M(0xffa020, { emissive: 0xff8a00, emissiveIntensity: 2 }));
-  beacon.position.set(-0.13, 0, 0.2); g.add(beacon);
-  cyl(0.004, 0.18, dark, -0.15, 0.07, 0.27);                     // mesh-radio antenna
-  g.userData = { beacon, lens };
+  for (const y of [-0.085, 0.085]) {                                                                       // white work lights
+    const l = new THREE.Mesh(new THREE.BoxGeometry(0.01, 0.025, 0.02), M(0xffffff, { emissive: 0xfff4dc, emissiveIntensity: 2 }));
+    l.position.set(0.212, y, 0.12); g.add(l);
+  }
+  // 4 microphones (hull corners), speaker grille, gas cell inlet, mesh-radio antenna, amber beacon
+  for (const [x, y] of [[0.17, 0.1], [0.17, -0.1], [-0.17, 0.1], [-0.17, -0.1]]) cylZ(0.009, 0.012, rubber, x, y, 0.18, 10);
+  const spk = cylZ(0.032, 0.006, M(0x1a1a1c, { roughness: 0.9 }), -0.12, 0.06, 0.181);
+  cylX(0.012, 0.02, M(0x6c5ce7, { roughness: 0.6 }), 0.0, -0.128, 0.1, 12);
+  cylZ(0.004, 0.2, rubber, -0.18, -0.09, 0.28, 8);
+  const beacon = new THREE.Mesh(new THREE.CylinderGeometry(0.018, 0.02, 0.03, 16), M(0xffa020, { emissive: 0xff8a00, emissiveIntensity: 2, transparent: true, opacity: 0.9 }));
+  beacon.rotation.x = Math.PI / 2; beacon.position.set(-0.17, 0.08, 0.195); g.add(beacon);
+  g.userData = { beacon, lens, head, speaker: spk };
   if (withLabels) {
-    const L = [['Thermal camera', 's1', 0.14, 0.05, 0.36], ['60 GHz radar', 's2', 0.14, -0.06, 0.3],
-      ['Depth + IR night camera', 's3', 0.13, -0.04, 0.4], ['Microphone array', 's4', 0.15, 0.12, 0.2],
-      ['Speaker', 's5', -0.1, 0, 0.21], ['CO + O2 gas cells', 's6', 0, 0.15, 0.12],
-      ['Self-temperature + battery', 's7', -0.05, -0.13, 0.12], ['Mesh radio', 's8', -0.15, 0.07, 0.37]];
-    for (const [t, c, x, y, z] of L) { const l = label(t, ''); l.element.classList.add(c); l.position.set(x, y, z); g.add(l); }
+    const L = [['Thermal camera (LWIR)', 's1', 0.2, 0.06, 0.42], ['60 GHz radar', 's2', 0.2, -0.08, 0.34],
+      ['Depth + IR night camera', 's3', 0.18, 0, 0.46], ['4 microphones', 's4', 0.2, 0.13, 0.2],
+      ['Speaker', 's5', -0.13, 0.08, 0.22], ['CO + O2 gas cells', 's6', 0, -0.17, 0.1],
+      ['Self-temperature + battery', 's7', -0.06, 0.16, 0.12], ['Mesh radio', 's8', -0.18, -0.09, 0.4],
+      ['Flippers: climb sills', '', 0.33, 0.2, 0.1], ['Carry handle', '', -0.04, 0, 0.27]];
+    for (const [t, c, x, y, z] of L) { const l = label(t, 'spec ' + c); l.position.set(x, y, z); g.add(l); }
   }
   return g;
 }
@@ -287,7 +328,7 @@ async function buildWorld(sc) {
   spot.position.set(0.14, 0, 0.3); spot.target.position.set(2, 0, 0); spot.castShadow = true;
   robot.add(spot, spot.target);
   const fov = new THREE.Mesh(new THREE.CircleGeometry(4 / 1.6, 32, -0.497, 0.995),   // 4 m thermal range (robot drawn 1.6x)
-    new THREE.MeshBasicMaterial({ color: 0x5fd3ff, transparent: true, opacity: 0.07, depthWrite: false }));
+    new THREE.MeshBasicMaterial({ color: 0x5fd3ff, transparent: true, opacity: 0.045, depthWrite: false }));
   fov.position.z = 0.02; robot.add(fov);
   const halo = new THREE.Mesh(new THREE.RingGeometry(0.3, 0.36, 48), new THREE.MeshBasicMaterial({ color: 0x2ee6ff, transparent: true, opacity: 0.8 }));
   halo.position.z = 0.012; robot.add(halo);
@@ -401,12 +442,16 @@ function updateDynamic(st, t, dt) {
         a.userData = { curve: c.userData.curve, off: k / 10 }; dyn.add(a); crewArrows.push(a);
       }
     }
+    const tagged = [];   // one tag per fire cluster (hottest seat), every seat still gets its no-go zone
+    for (const f of (st.fires || []).slice().sort((p, q) => q[2] - p[2])) {
+      f.tag = !tagged.some((q) => Math.hypot(q[0] - f[0], q[1] - f[1]) < 2.2); if (f.tag) tagged.push(f);
+    }
     for (const f of st.fires || []) {
       const zone = new THREE.Mesh(new THREE.CircleGeometry(1.0, 40), new THREE.MeshBasicMaterial({ color: COL.fire, transparent: true, opacity: 0.16, depthWrite: false }));
       zone.position.set(f[0], f[1], 0.02); dyn.add(zone);
       const ring = new THREE.Mesh(new THREE.RingGeometry(0.95, 1.05, 48), new THREE.MeshBasicMaterial({ color: COL.fire, toneMapped: false }));
       ring.position.set(f[0], f[1], 0.025); dyn.add(ring);
-      const l = label(`Fire ${f[2]} C · ${f[3]} · no-go`, 'fire'); l.position.set(f[0], f[1], 1.9); dyn.add(l);
+      if (f.tag) { const l = label(`FIRE ${f[2]} C · ${f[3]}`, 'pin fire'); l.position.set(f[0], f[1], 1.9); dyn.add(l); }
     }
     for (const tr of st.tracks || []) {
       const col = PRIO[tr.prio] ?? PRIO['P?'];
@@ -414,9 +459,11 @@ function updateDynamic(st, t, dt) {
       beam.rotation.x = Math.PI / 2; beam.position.set(tr.xy[0], tr.xy[1], 0.6); dyn.add(beam);
       const ball = new THREE.Mesh(new THREE.SphereGeometry(0.08, 16, 12), new THREE.MeshBasicMaterial({ color: col, toneMapped: false }));
       ball.position.set(tr.xy[0], tr.xy[1], 1.25); ball.userData.pulse = true; dyn.add(ball);
-      const txt = tr.prio === 'EVAC' ? `#${tr.id} walking out` : tr.state === 'pinned'
-        ? `${tr.prio} · #${tr.id}${tr.rank ? ' · rescue ' + tr.rank : ''}` : `Possible #${tr.id} · checking`;
-      const l = label(txt, 'person ' + prioClass(tr.prio)); l.position.set(tr.xy[0], tr.xy[1], 1.5); dyn.add(l);
+      const txt = tr.prio === 'EVAC' ? 'Walking out' : tr.state === 'pinned'
+        ? `${tr.rank ? tr.rank + '. ' : ''}${tr.prio} person · ${tr.room}` : `Possible person · ${tr.room}`;
+      const l = label(txt, 'pin person ' + prioClass(tr.prio)); l.position.set(tr.xy[0], tr.xy[1], 1.5); dyn.add(l);
+      const gr = new THREE.Mesh(new THREE.RingGeometry(0.62, 0.72, 48), new THREE.MeshBasicMaterial({ color: col, toneMapped: false, transparent: true, opacity: 0.9 }));
+      gr.position.set(tr.xy[0], tr.xy[1], 0.03); dyn.add(gr);
       if (!seenTracks.has(tr.id + tr.state)) { seenTracks.add(tr.id + tr.state); ping(tr.xy[0], tr.xy[1], col); }
     }
     for (const r of evac) { const e2 = tube(r, COL.evac, 0.03, 0.08); if (e2) dyn.add(e2); }
@@ -469,12 +516,19 @@ function setView(v) {
   controls.enabled = v === 'over';
   renderer.toneMappingExposure = v === 'eye' ? 0.8 : 1.05;
   if (robot) robot.visible = v !== 'eye';
-  camera.fov = { over: 40, follow: 55, eye: 52 }[v]; camera.near = v === 'eye' ? 0.05 : 0.05;
+  camera.fov = { over: 40, plan: 40, follow: 55, eye: 52 }[v]; camera.near = 0.05;
   camera.updateProjectionMatrix();
+  controls.enabled = v === 'over' || v === 'plan';
   if (v === 'over') fitOverview();
+  if (v === 'plan') {   // straight down, like a fire-service floor plan
+    const fov = THREE.MathUtils.degToRad(camera.fov);
+    const need = Math.max((SC.height * 1.12) / 2 / Math.tan(fov / 2), (SC.width * 1.12) / 2 / (Math.tan(fov / 2) * camera.aspect));
+    controls.target.set(SC.width / 2, SC.height / 2, 0);
+    camera.position.set(SC.width / 2, SC.height / 2 - 0.001, need);
+  }
 }
 document.querySelectorAll('.viewbar [data-v]').forEach((b) => b.onclick = () => setView(b.dataset.v));
-addEventListener('resize', () => { if (view === 'over') fitOverview(); });
+addEventListener('resize', () => { if (view === 'over' || view === 'plan') setView(view); });
 
 // ------------------------------------------------------------------ panels
 const fmt = (s) => `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
@@ -641,7 +695,7 @@ addEventListener('keydown', (e) => {
   if (k === 'escape') { armFire = false; $('#clickhint').hidden = true; drawer.hidden = true; }
   else if (k === 's') post({ action: 'stop' });
   else if (k === 'r') post({ action: 'recall' });
-  else if (k === 'v') setView({ over: 'follow', follow: 'eye', eye: 'over' }[view]);
+  else if (k === 'v') setView({ over: 'plan', plan: 'follow', follow: 'eye', eye: 'over' }[view]);
   else if ('1234'.includes(k)) selectFeed(['thermal', 'night', 'colour', 'map'][+k - 1]);
 });
 
@@ -686,10 +740,13 @@ $('#b-robot').onclick = () => {
   Object.assign(lab.domElement.style, { position: 'absolute', pointerEvents: 'none', top: '0', left: '0' });
   c.parentElement.append(lab.domElement);
   const s = new THREE.Scene();
-  s.add(new THREE.HemisphereLight(0xffffff, 0x223344, 1.2));
-  const dl = new THREE.DirectionalLight(0xffffff, 2); dl.position.set(2, -2, 3); s.add(dl);
-  s.add(buildRobot(true));
-  const cam = new THREE.PerspectiveCamera(35, 1, 0.01, 20); cam.up.set(0, 0, 1); cam.position.set(1.0, -0.9, 0.7);
+  s.add(new THREE.HemisphereLight(0xdfe6ff, 0x2a2622, 1.6));
+  const dl = new THREE.DirectionalLight(0xffffff, 3.2); dl.position.set(2, -2, 3); s.add(dl);
+  const rim = new THREE.DirectionalLight(0xffb070, 2.0); rim.position.set(-2, 2, 1.5); s.add(rim);
+  const floorDisc = new THREE.Mesh(new THREE.CircleGeometry(0.6, 48), new THREE.MeshStandardMaterial({ color: 0x2a2a2e, roughness: 0.9 }));
+  s.add(floorDisc, buildRobot(true));
+  r.toneMapping = THREE.ACESFilmicToneMapping; r.toneMappingExposure = 1.3;
+  const cam = new THREE.PerspectiveCamera(32, 1, 0.01, 20); cam.up.set(0, 0, 1); cam.position.set(1.35, -1.25, 0.95);
   const oc = new OrbitControls(cam, c); oc.target.set(0, 0, 0.2); oc.autoRotate = true; oc.autoRotateSpeed = 1.2;
   showcase = () => {
     const w = c.clientWidth; r.setSize(w, w, false); lab.setSize(w, w); cam.aspect = 1; cam.updateProjectionMatrix();
@@ -729,6 +786,7 @@ function frame() {
     if (!robotPose) { smooth = { ...r }; robotPose = true; }
     robot.position.set(smooth.x, smooth.y, 0); robot.rotation.z = smooth.yaw;
     robot.userData.beacon.material.emissiveIntensity = 1 + 2 * (Math.sin(t * 8) > 0);
+    robot.userData.head.rotation.z = 0.35 * Math.sin(t * 0.9);  // pan-tilt head scanning
     robot.userData.halo.scale.setScalar(1 + 0.15 * Math.sin(t * 3));
     let maxG = 0;
     for (const th of ST.things) {
