@@ -339,9 +339,18 @@ def _sigmoid(z):
 class Calibrator:
     """Logistic casualty-confidence model; IC feedback = one SGD step (live learning)."""
 
-    def __init__(self, path: str = 'feedback.jsonl', lr: float = 0.5):
-        self.w = np.array([-4.0, 1.5, 1.5, 1.0, 2.0, 3.0])
-        self.path, self.lr = path, lr
+    def __init__(self, path: str = 'feedback.jsonl', lr: float = 0.5, weights_path: str | None = None):
+        self.w = np.array([-4.0, 1.5, 1.5, 1.0, 2.0, 3.0])   # hand-set prior, replaced by trained weights if present
+        self.path, self.lr, self.weights_path = path, lr, weights_path
+        self.source = 'hand-set prior'
+        if weights_path:
+            try:
+                with open(weights_path, encoding='utf-8') as fh:
+                    d = json.load(fh)
+                self.w = np.array(d['w'], float)
+                self.source = d.get('source', 'saved weights')
+            except (OSError, ValueError, KeyError):
+                pass
 
     @staticmethod
     def features(tr: Track) -> np.ndarray:
@@ -364,6 +373,10 @@ class Calibrator:
         self.w += self.lr * ((1.0 if label else 0.0) - _sigmoid(float(self.w @ f))) * f
         with open(self.path, 'a', encoding='utf-8') as fh:
             fh.write(json.dumps({'features': f.round(4).tolist(), 'label': bool(label), 'track': tr.id}) + '\n')
+        if self.weights_path:  # keep what the IC taught for the next mission
+            self.source = 'trained + IC feedback'
+            with open(self.weights_path, 'w', encoding='utf-8') as fh:
+                json.dump({'w': self.w.round(6).tolist(), 'source': self.source}, fh)
 
 
 # ================================================================== brain
@@ -452,10 +465,11 @@ def _wrap(a):
 
 
 class Brain:
-    def __init__(self, width: float, height: float, start_xy, feedback_path: str = 'feedback.jsonl'):
+    def __init__(self, width: float, height: float, start_xy, feedback_path: str = 'feedback.jsonl',
+                 weights_path: str | None = None):
         self.grid = Grid(width, height)
         self.tracker = Tracker()
-        self.cal = Calibrator(feedback_path)
+        self.cal = Calibrator(feedback_path, weights_path=weights_path)
         self.start_cell = self.grid.to_cell(*start_xy)
         self.mode = 'EXPLORE'
         self.path: list = []

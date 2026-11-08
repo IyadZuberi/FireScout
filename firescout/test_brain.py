@@ -368,3 +368,14 @@ def test_planner_keeps_robot_radius_from_walls():
     c = cost_map(g)
     assert not np.isfinite(c[7, 3]) and not np.isfinite(c[9, 3])   # cells touching the wall are forbidden
     assert np.isfinite(c[6, 3])
+
+
+def test_detector_learning_persists_across_missions(tmp_path):
+    wfile = tmp_path / 'w.json'
+    b = Brain(12, 8, (0.6, 4.0), feedback_path=str(tmp_path / 'fb.jsonl'), weights_path=str(wfile))
+    tr = Track(1, 'warm', (3.0, 4.0), deque([55.0] * 5), deque([True] * 5), 0.4, 0.4)
+    b.tracker.tracks.append(tr)
+    before = b.cal.conf(tr)
+    b.feedback(1, False)
+    b2 = Brain(12, 8, (0.6, 4.0), feedback_path=str(tmp_path / 'fb.jsonl'), weights_path=str(wfile))  # next mission
+    assert abs(b2.cal.conf(tr) - b.cal.conf(tr)) < 1e-5 and b2.cal.conf(tr) < before

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import math
+import os
 import threading
 import time
 from collections import deque
@@ -35,6 +36,7 @@ SPREAD_EVERY = 25.0
 CREW_ENTRY_S = 150.0
 SCALE = 6           # map pixels per grid cell
 DEBUG = False
+WEIGHTS = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'calibrator_weights.json')
 
 # ------------------------------------------------------------------ images
 
@@ -293,7 +295,7 @@ class BrainWorker(threading.Thread):
         self.thermal_rgb = None
         self.ticks = 0
         self.lat: deque = deque(maxlen=300)
-        self.b = B.Brain(L.width, L.height, L.start)
+        self.b = B.Brain(L.width, L.height, L.start, weights_path=WEIGHTS)  # learning carries over between missions
 
     def kick(self):
         """Main thread: read the sensors now, hand the observation to the brain thread."""
