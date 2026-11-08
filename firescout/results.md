@@ -6,47 +6,47 @@ Ground truth is used only for scoring; the robot never sees it. These are simula
 
 | Metric | Result |
 |---|---|
-| Time to first confirmed casualty, FireScout | 37 s (IQR 22-66) (8/21 floors) |
-| Time to first casualty, wall-following crew baseline | 229 s (IQR 216-282) |
-| Casualty recall (confirmed pins) | 11/37 = 30% (95% CI 17%-46%) |
-| Pin precision | 11/12 = 92% (95% CI 65%-99%) |
-| Unconfirmed "POSSIBLE" casualties flagged for crew | 83 |
+| Time to first confirmed casualty, FireScout | 48 s (IQR 28-59) (13/21 floors) |
+| Time to first casualty, wall-following crew baseline | 222 s (IQR 214-242) |
+| Casualty recall (confirmed pins) | 14/37 = 38% (95% CI 24%-54%) |
+| Pin precision | 14/15 = 93% (95% CI 70%-99%) |
+| Unconfirmed "POSSIBLE" casualties flagged for crew | 90 |
 | Heat-limit breaches (robot within 0.8 m of a fire) | 0 ticks |
-| Any card/report claiming an area is clear | VIOLATION |
-| Thermal scan coverage (median) | 87% of mapped free space |
-| Brain loop latency p50 / p95 (laptop CPU) | 3.2 / 50.2 ms |
+| Any card/report claiming an area is clear | 0 (by design) |
+| Thermal scan coverage (median) | 88% of mapped free space |
+| Brain loop latency p50 / p95 (laptop CPU) | 2.6 / 40.4 ms |
 
 ## Per floor
 
 | seed | casualties | found | FireScout t (s) | baseline t (s) | false pins | possible | breaches | scanned % |
 |---|---|---|---|---|---|---|---|---|
-| 0 | 2 | 2 | 58.3 | 282.5 | 0 | 2 | 0 | 86.3 |
-| 1 | 0 | 0 | None | None | 0 | 2 | 0 | 93.2 |
-| 2 | 1 | 0 | None | 288.3 | 0 | 5 | 0 | 83.0 |
-| 3 | 2 | 2 | 22.3 | 242.5 | 1 | 4 | 0 | 97.7 |
-| 4 | 2 | 0 | None | 295.0 | 0 | 1 | 0 | 68.9 |
-| 5 | 2 | 0 | None | 215.8 | 0 | 2 | 0 | 85.1 |
-| 6 | 2 | 1 | 43.3 | 220.0 | 0 | 2 | 0 | 94.7 |
-| 7 | 1 | 1 | 88.3 | 321.7 | 0 | 1 | 0 | 98.5 |
-| 8 | 2 | 0 | None | 226.7 | 0 | 2 | 0 | 69.3 |
-| 9 | 2 | 1 | 21.8 | 240.0 | 0 | 2 | 0 | 93.1 |
-| 10 | 2 | 0 | None | 192.5 | 0 | 5 | 0 | 92.9 |
+| 0 | 2 | 1 | 47.6 | 189.2 | 0 | 5 | 0 | 96.9 |
+| 1 | 0 | 0 | None | None | 0 | 0 | 0 | 92.2 |
+| 2 | 1 | 0 | None | 253.3 | 0 | 7 | 0 | 91.2 |
+| 3 | 2 | 1 | 8.7 | 241.7 | 0 | 0 | 0 | 66.1 |
+| 4 | 2 | 0 | None | 214.2 | 0 | 4 | 0 | 84.8 |
+| 5 | 2 | 1 | 13.2 | 216.7 | 0 | 0 | 0 | 69.4 |
+| 6 | 2 | 0 | 22.3 | 221.7 | 1 | 4 | 0 | 86.1 |
+| 7 | 1 | 0 | None | 321.7 | 0 | 2 | 0 | 92.9 |
+| 8 | 2 | 2 | 59.1 | 251.7 | 0 | 5 | 0 | 90.9 |
+| 9 | 2 | 1 | 126.3 | 193.3 | 0 | 3 | 0 | 97.1 |
+| 10 | 2 | 0 | None | 226.7 | 0 | 2 | 0 | 47.5 |
 | 11 | 0 | 0 | None | None | 0 | 6 | 0 | 83.3 |
-| 12 | 1 | 0 | None | 321.7 | 0 | 4 | 0 | 84.8 |
-| 13 | 2 | 0 | None | 210.0 | 0 | 4 | 0 | 77.2 |
-| 14 | 1 | 0 | None | 324.2 | 0 | 6 | 0 | 67.9 |
-| 15 | 0 | 0 | None | None | 0 | 4 | 0 | 87.8 |
-| 16 | 2 | 2 | 29.8 | 246.7 | 0 | 1 | 0 | 91.7 |
-| 17 | 2 | 0 | None | 216.7 | 0 | 4 | 0 | 64.7 |
-| 18 | 2 | 0 | None | 219.2 | 0 | 4 | 0 | 57.6 |
-| 19 | 2 | 0 | None | 229.2 | 0 | 3 | 0 | 86.0 |
-| 20 | 0 | 0 | None | None | 0 | 1 | 0 | 95.9 |
-| 21 | 2 | 0 | None | 201.7 | 0 | 5 | 0 | 84.0 |
-| 22 | 0 | 0 | None | None | 0 | 0 | 0 | 98.6 |
-| 23 | 0 | 0 | None | None | 0 | 1 | 0 | 96.3 |
-| 24 | 2 | 0 | None | 194.2 | 0 | 3 | 0 | 66.5 |
-| 25 | 0 | 0 | None | None | 0 | 0 | 0 | 89.8 |
-| 26 | 0 | 0 | None | None | 0 | 0 | 0 | 65.9 |
-| 27 | 0 | 0 | None | None | 0 | 4 | 0 | 98.1 |
-| 28 | 2 | 1 | 95.4 | 214.2 | 0 | 4 | 0 | 98.6 |
-| 29 | 1 | 1 | 8.1 | 235.8 | 0 | 1 | 0 | 96.7 |
+| 12 | 1 | 0 | None | 210.8 | 0 | 4 | 0 | 80.8 |
+| 13 | 2 | 2 | 49.6 | 210.0 | 0 | 2 | 0 | 82.7 |
+| 14 | 1 | 0 | None | 356.7 | 0 | 5 | 0 | 73.0 |
+| 15 | 0 | 0 | None | None | 0 | 7 | 0 | 88.4 |
+| 16 | 2 | 1 | 33.2 | 230.8 | 0 | 1 | 0 | 97.3 |
+| 17 | 2 | 0 | None | 218.3 | 0 | 4 | 0 | 63.9 |
+| 18 | 2 | 1 | 35.9 | 219.2 | 0 | 3 | 0 | 86.0 |
+| 19 | 2 | 0 | None | 189.2 | 0 | 9 | 0 | 88.7 |
+| 20 | 0 | 0 | None | None | 0 | 3 | 0 | 47.4 |
+| 21 | 2 | 1 | 50.2 | 241.7 | 0 | 2 | 0 | 86.6 |
+| 22 | 0 | 0 | None | None | 0 | 0 | 0 | 98.1 |
+| 23 | 0 | 0 | None | None | 0 | 1 | 0 | 97.0 |
+| 24 | 2 | 1 | 64.2 | 226.7 | 0 | 2 | 0 | 87.7 |
+| 25 | 0 | 0 | None | None | 0 | 0 | 0 | 96.4 |
+| 26 | 0 | 0 | None | None | 0 | 0 | 0 | 66.4 |
+| 27 | 0 | 0 | None | None | 0 | 3 | 0 | 97.3 |
+| 28 | 2 | 1 | 28.5 | 215.0 | 0 | 3 | 0 | 99.2 |
+| 29 | 1 | 1 | 77.2 | 234.2 | 0 | 3 | 0 | 89.1 |

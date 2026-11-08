@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>FireScout technical summary</title>
+<style>
+@page { size: A4; margin: 11mm 12mm; }
+body { font: 9.3pt/1.32 "Segoe UI", Arial, sans-serif; color: #111; margin: 0; }
+h1 { font-size: 17pt; margin: 0; } h1 small { font-size: 9.5pt; color: #555; font-weight: 400; }
+h2 { font-size: 10.5pt; margin: 7px 0 3px; color: #b3261e; text-transform: uppercase; letter-spacing: .04em; }
+p { margin: 2px 0 4px; } ul { margin: 2px 0 4px 16px; padding: 0; } li { margin: 1px 0; }
+.cols { display: grid; grid-template-columns: 1fr 1fr; gap: 0 16px; }
+table { border-collapse: collapse; width: 100%; font-size: 8.8pt; } td, th { border: 1px solid #ccc; padding: 2px 5px; text-align: left; vertical-align: top; }
+th { background: #f3f3f3; } .arch { font: 8.2pt/1.3 Consolas, monospace; background: #f6f6f6; padding: 5px 7px; border-radius: 4px; white-space: pre; }
+.k { font-weight: 700; } .muted { color: #555; }
+</style></head><body>
+<h1>FireScout <small>- autonomous search scout for UK fire crews · AgentVerse 2026 Robotics · github.com/IyadZuberi/FireScout</small></h1>
+
+<h2>User and problem</h2>
+<p><span class="k">User:</span> the Incident Commander (IC) and the breathing-apparatus (BA) crew at a building fire.
+<span class="k">Problem:</span> crews search blind in smoke while survival falls by the minute (~75% if reached within 2 min vs ~28% after 8 min,
+~1,000 rescues, Fire Engineering tally). Existing robots are teleoperated, heavy and cost $75k-$210k. FireScout is a 3-5 kg, ~$1.3-2.3k
+tracked scout placed at the door during the 2-5 min the crew needs to don BA. It has <b>no floor plan</b> and needs no operator.</p>
+
+<div class="cols"><div>
+<h2>Key features</h2>
+<ul>
+<li><b>Finds people in zero visibility:</b> thermal blobs + tracker + logistic confidence; PIN only with two sensors (thermal &ge; 0.8 AND radar breathing &ge; 0.5); otherwise kept as POSSIBLE for the crew.</li>
+<li><b>Maps an unknown building:</b> 60 GHz radar ring + depth; tells furniture from walls by seen object height; map accuracy vs the hidden plan shown live.</li>
+<li><b>Ranks who to rescue first</b> (P1/P2/possible) from breathing, voice, distance to fire, heat, CO, O2; crew route visits P1 first.</li>
+<li><b>Talks to conscious people:</b> hears calls (4-mic bearing), then speaker: walk out if the measured route stays &lt; 60 C and 1.5 m from fire, else stay put and stay low.</li>
+<li><b>Adapts live:</b> fire grows and spreads, smoke banks down, IC ignites objects or cuts the radio: it replans, retreats, re-checks, works offline.</li>
+<li><b>Explains itself:</b> every action is a decision card with the sensor reading and rule; METHANE (JESIP) report from its own map.</li>
+<li><b>IC in control:</b> STOP / RESUME / RECALL / search-room-first; IC confirm/reject trains the person detector (one SGD step).</li>
+</ul>
+</div><div>
+<h2>System architecture</h2>
+<div class="arch">MuJoCo world (physics, fire/smoke growth, occupants)
+   | noisy sensor models (sensors.py)
+   v  thermal 160x120 | radar 36 rays + breath | depth/IR
+      mics (voice bearing) | CO, O2 | self-temp | radio
+AGENT on robot CPU (brain.py, numpy, 10 Hz)
+   map -> perceive/track -> safety gate -> IC order
+   -> verify person -> follow voice -> explore
+   -> speed, speaker, routes, cards, METHANE
+   | state + IC commands (localhost)
+IC console: browser three.js draws MuJoCo state only</div>
+<h2>Where each model runs</h2>
+<table><tr><th>Part</th><th>Runs on</th><th>Latency</th></tr>
+<tr><td>Perception, mapping, planning, safety, speaker policy</td><td>robot CPU (target Jetson Orin Nano Super, 7-25 W); measured on laptop CPU</td><td>p50 RESULT_P50 ms, p95 RESULT_P95 ms (budget 50 ms)</td></tr>
+<tr><td>METHANE, decision cards</td><td>robot CPU, templates</td><td>&lt; 1 ms</td></tr>
+<tr><td>Cloud / LLM</td><td colspan="2"><b>none in the decision loop</b> - keeps working with the radio lost</td></tr></table>
+</div></div>
+
+<h2>Results (simulation, 30 unseen procedurally generated floors, 180 s missions)</h2>
+<table><tr><th>First confirmed casualty</th><th>Crew baseline (wall-following, enters at 150 s)</th><th>Recall (confirmed)</th><th>Pin precision</th><th>Heat breaches</th><th>"Area clear" claims</th></tr>
+<tr><td>RESULT_FIRST</td><td>RESULT_BASE</td><td>RESULT_RECALL</td><td>RESULT_PREC</td><td>RESULT_BREACH</td><td>RESULT_CLEAR</td></tr></table>
+
+<div class="cols"><div>
+<h2>Critical failure mode and safety</h2>
+<p><b>Critical failure: a person missed and an area wrongly reported "clear"</b>, so the crew skips it. Handling: the robot
+never declares an area empty (enforced in tests and the evaluation); unconfirmed warm bodies stay POSSIBLE with location
+and "crew must check"; scanned % is reported as coverage, not clearance; IC can reject false positives.</p>
+<ul>
+<li>Safety gate (fixed, never learned): no-go cells &gt; 250 C, retreat at 60 C self-temperature or 15% battery.</li>
+<li>Radio loss: keeps searching, queues findings, returns to last radio contact.</li>
+<li>Speaker policy only advises evacuation on a route it has measured as cool and clear of fire.</li>
+</ul>
+</div><div>
+<h2>Limits</h2>
+<ul>
+<li>Simulation only; fire, smoke and heat are engineered models, not CFD. Voices synthesised.</li>
+<li>One floor, no stairs or doors to open; planar robot base.</li>
+<li>Breathing needs line of sight within ~2.5 m; radar does not see through rubble. RECALL_LIMIT</li>
+<li>Priority labels support the crew; they are not clinical triage (UK guidance: medically led).</li>
+</ul>
+</div></div>
+<p class="muted">Assets: NVIDIA SimReady (CC-BY-4.0), Quaternius Universal Base Characters (CC0), three.js (MIT).</p>
+</body></html>
