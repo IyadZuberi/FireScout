@@ -37,6 +37,10 @@ CREW_ENTRY_S = 150.0
 SCALE = 6           # map pixels per grid cell
 DEBUG = False
 WEIGHTS = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'calibrator_weights.json')
+SHIPPED = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'detector_weights.json')  # trained on Modal
+if not os.path.exists(WEIGHTS) and os.path.exists(SHIPPED):  # first run on this laptop starts from the trained detector
+    import shutil
+    shutil.copy(SHIPPED, WEIGHTS)
 
 # ------------------------------------------------------------------ images
 

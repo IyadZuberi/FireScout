@@ -197,3 +197,7 @@ dialog h2 { font-size: 20px; }
 .lbl.pin { font-size: 15px; padding: 6px 11px; box-shadow: 0 4px 14px rgba(0,0,0,.55); }
 .lbl.pin.fire { font-weight: 700; letter-spacing: .02em; }
 .lbl.spec { background: rgba(15,15,16,.88); border: 1px solid var(--line-2); font-weight: 500; }
+.vla { margin-top: 8px; }
+.vla button { width: 100%; justify-content: center; min-height: 40px; font-size: 14px; }
+.vla-out { margin: 8px 0 0; padding: 10px 12px; border: 1px dashed var(--line-2); border-radius: var(--r); font-size: 14px; color: var(--text-2); white-space: pre-wrap; }
+.vla-out b { color: var(--text); display: block; font-size: 12px; text-transform: uppercase; letter-spacing: .05em; margin-bottom: 4px; }

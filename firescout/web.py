@@ -286,6 +286,8 @@ class Sim:
                 'now': self.now_sentence(b, o),
                 'tracks': tracks,
                 'robot_room': self.room_of((rx, ry)),
+                'radar': [_r(v, 2) for v in o.ranges],
+                'guard_stops': b.guard_stops,
                 'voice': (list(map(_r, b.voice_hint[:3])) if b.voice_hint and b.t - b.voice_hint[3] < 4 else None),
                 'cards': new_cards,
                 'obs': {'self_temp': _r(o.self_temp_c, 0), 'battery': _r(o.battery), 'co': _r(o.gas_ppm, 0),
@@ -321,7 +323,13 @@ class Sim:
             self.feeds['thermal'] = enc(self.w.thermal_rgb)
         with self.w.lock:
             mp = R.map_image(self.w.b, self.rooms)
+            g = self.w.b.grid
+            fog = ((~g.scanned) & (g.occ != 1)).astype(np.uint8)[::-1] * 170   # alpha: unexplored = dark
         self.feeds['map'] = enc(mp)
+        rgba = np.zeros(fog.shape + (4,), np.uint8)
+        rgba[..., :3] = (8, 9, 12)
+        rgba[..., 3] = fog
+        self.feeds['fog'] = cv2.imencode('.png', cv2.cvtColor(rgba, cv2.COLOR_RGBA2BGRA))[1].tobytes()
 
     def close(self):
         self.feed_r.close()
@@ -340,6 +348,42 @@ class App:
         self.feeds: dict[str, bytes] = {}
         self.version = 0
         self.seq = 0
+
+
+VLA_MODELS = [m for m in (os.environ.get('GEMINI_VLA_MODEL'), 'gemini-robotics-er-1.5-preview', 'gemini-2.5-flash') if m]
+VLA_PROMPT = ('You are an advisory vision assistant for a fire-service Incident Commander. The image is from a search robot '
+              'inside a burning building ({feed} camera). In at most 3 short lines say: any people (position in frame, posture, '
+              'whether they look conscious), fire or heat, and obstacles or hazards. If unsure say so. No speculation.')
+
+
+def ask_vla(app: 'App', feed: str) -> dict:
+    """Advisory only: a cloud vision-language model describes the robot's current frame for the IC.
+    Runs on the HTTP thread, never touches the robot's decisions, and fails soft without internet or a key."""
+    key = os.environ.get('GEMINI_API_KEY') or os.environ.get('GOOGLE_API_KEY')
+    if not key:
+        return {'ok': False, 'text': 'AI advisory is off: set GEMINI_API_KEY on this laptop and restart.'}
+    img = app.feeds.get(feed if feed in ('thermal', 'night', 'colour') else 'thermal')
+    if not img:
+        return {'ok': False, 'text': 'No camera frame yet.'}
+    try:
+        from google import genai
+        from google.genai import types
+        client = genai.Client(api_key=key)
+        err = ''
+        for model in VLA_MODELS:
+            try:
+                t0 = time.perf_counter()
+                r = client.models.generate_content(
+                    model=model, contents=[types.Part.from_bytes(data=img, mime_type='image/jpeg'),
+                                           VLA_PROMPT.format(feed=feed)],
+                    config=types.GenerateContentConfig(temperature=0.2, max_output_tokens=200))
+                return {'ok': True, 'text': (r.text or '').strip(), 'model': model,
+                        'ms': round((time.perf_counter() - t0) * 1000)}
+            except Exception as e:  # noqa: BLE001 - try the next model
+                err = str(e)[:160]
+        return {'ok': False, 'text': f'AI advisory failed: {err}'}
+    except ImportError:
+        return {'ok': False, 'text': 'AI advisory needs: pip install google-genai'}
 
 
 def make_handler(app: App):
@@ -376,7 +420,9 @@ def make_handler(app: App):
                     return
             if p.startswith('/feed/'):
                 body = app.feeds.get(p[6:].split('.')[0])
-                return self._send(body, 'image/jpeg') if body else self._send(b'', 'image/jpeg', 404)
+                name = p[6:].split('.')[0]
+                ctype = 'image/png' if name == 'fog' else 'image/jpeg'
+                return self._send(body, ctype) if body else self._send(b'', ctype, 404)
             if p.startswith('/assets/'):
                 fp = os.path.normpath(os.path.join(HERE, p.lstrip('/')))
                 if not fp.startswith(os.path.join(HERE, 'assets')) or not os.path.isfile(fp):
@@ -387,6 +433,16 @@ def make_handler(app: App):
             return super().do_GET()
 
         def do_POST(self):
+            if urlparse(self.path).path == '/api/vla':
+                ok_hosts = (f'localhost:{self.server.server_port}', f'127.0.0.1:{self.server.server_port}')
+                if self.headers.get('Host', '') not in ok_hosts:
+                    return self._send(b'forbidden', 'text/plain', 403)
+                n = min(int(self.headers.get('Content-Length', 0) or 0), 256)
+                try:
+                    feed = json.loads(self.rfile.read(n) or b'{}').get('feed', 'thermal')
+                except (json.JSONDecodeError, AttributeError):
+                    feed = 'thermal'
+                return self._send(json.dumps(ask_vla(app, str(feed))).encode(), 'application/json')
             # only the console page itself may command the robot (blocks cross-site requests from other tabs)
             origin = self.headers.get('Origin', '')
             host = self.headers.get('Host', '')

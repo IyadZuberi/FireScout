@@ -259,7 +259,9 @@ class Track:
     breath_n: int = 0
     responsive: bool = False   # heard calling (mic bearing matched this track)
     verify_tries: int = 0
-    instruct: str | None = None   # 'EVACUATE' | 'SHELTER' once the robot has spoken to this person
+    instruct: str | None = None   # 'EVACUATE' | 'SHELTER' | 'NO_RESPONSE' once the robot has spoken to this person
+    instruct_t: float = 0.0
+    instruct_xy: tuple | None = None
     verify_from: tuple | None = None  # where the last breath check was taken from
     priority: str = ''
 
@@ -575,6 +577,8 @@ class Brain:
         why.append('calling out' if tr.responsive else 'no voice heard')
         if tr.instruct == 'EVACUATE':
             return 'EVAC', 5.0, 'told to walk out: expect at entry, ' + ', '.join(why)
+        if tr.instruct == 'NO_RESPONSE':
+            return 'P1', 120.0, 'did not respond to the evacuation instruction, ' + ', '.join(why)
         if tr.state != 'pinned':
             label, base = 'P?', 50.0
         elif not tr.responsive or hazard:
@@ -603,9 +607,11 @@ class Brain:
         x, y, yaw = obs.pose
         for rel, db in obs.voices:
             wb = _wrap(yaw + rel)
+            d_est = 10 ** ((70.0 - db) / 20.0)   # shout ~70 dB at 1 m, spherical spreading (walls make it look farther)
             match = [tr for tr in self.tracker.tracks if tr.kind == 'warm' and tr.state != 'rejected'
                      and abs(_wrap(math.atan2(tr.xy[1] - y, tr.xy[0] - x) - wb))
-                     < (2 * VOICE_MATCH_RAD if tr.responsive else VOICE_MATCH_RAD)]
+                     < (2 * VOICE_MATCH_RAD if tr.responsive else VOICE_MATCH_RAD)
+                     and d_est / 4 <= math.dist((x, y), tr.xy) <= d_est * 1.6 + 1.0]
             if match:
                 for tr in match:
                     if not tr.responsive:
@@ -774,6 +780,12 @@ class Brain:
                 self.emit('PRIORITY', 'thermal+radar+mic+gas', f'casualty#{tr.id} {label}: {why}',
                           'rescue order updated', 'rescue-priority')
         self._instruct(cost, here)
+        for tr in pinned:  # did the person actually walk out? never assume - re-check what the sensors say
+            if (tr.instruct == 'EVACUATE' and self.t - tr.instruct_t > 20.0 and tr.hits and tr.hits[-1]
+                    and math.dist(tr.xy, tr.instruct_xy) < 1.0):
+                tr.instruct = 'NO_RESPONSE'
+                self.emit('SAY', 'thermal', f'person#{tr.id} did not move 20 s after the evacuation instruction',
+                          'back on the rescue list as P1', 'verify-instruction-followed')
         ranked = sorted([t for t in pinned if t.instruct != 'EVACUATE'], key=lambda t: -self.priority(t)[1])[:4]
         visit, cur, path = [], here, [here]
         for tr in ranked:
@@ -802,6 +814,7 @@ class Brain:
             near_fire = min((math.dist(g.to_world(*c), f[:2]) for c in (route or []) for f in self.fires), default=99.0)
             safe = route is not None and hot <= EVAC_MAX_C and near_fire >= EVAC_FIRE_CLEARANCE
             tr.instruct = 'EVACUATE' if safe else 'SHELTER'
+            tr.instruct_t, tr.instruct_xy = self.t, tr.xy
             detail = (f'person#{tr.id} conscious; way out {len(route) * RES:.1f}m, max {hot:.0f}C, '
                       f'{near_fire:.1f}m from fire') if route else f'person#{tr.id} conscious; no known way out'
             self.emit('SAY', 'mic+thermal', detail,

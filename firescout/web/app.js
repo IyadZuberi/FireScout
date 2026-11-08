@@ -267,6 +267,7 @@ export function buildRobot(withLabels = false) {
 }
 
 // ------------------------------------------------------------------ world (rebuilt per scenario)
+let fogPlane = null, radarLines = null, radarHits = null;
 let world = null, SC = null, robot = null, fires = {}, thingMeshes = {}, smokeLayer = null, mapTexPlane = null;
 const dyn = new THREE.Group(); scene.add(dyn);   // routes, markers: rebuilt from state
 let showSmoke = true, view = 'over';
@@ -323,18 +324,27 @@ async function buildWorld(sc) {
   }
   world.add(smokeLayer);
   robot = buildRobot();
-  robot.scale.setScalar(1.6);  // drawn 1.6x so it reads at building scale
+  // true scale (0.46 m long): found by its halo, label and live radar sweep, not by inflating it
   const spot = new THREE.SpotLight(0xfff4dc, 6, 9, 0.5, 0.6, 1.4);
   spot.position.set(0.14, 0, 0.3); spot.target.position.set(2, 0, 0); spot.castShadow = true;
   robot.add(spot, spot.target);
-  const fov = new THREE.Mesh(new THREE.CircleGeometry(4 / 1.6, 32, -0.497, 0.995),   // 4 m thermal range (robot drawn 1.6x)
+  const fov = new THREE.Mesh(new THREE.CircleGeometry(4, 32, -0.497, 0.995),   // thermal camera: 57 deg, 4 m useful range
     new THREE.MeshBasicMaterial({ color: 0x5fd3ff, transparent: true, opacity: 0.045, depthWrite: false }));
   fov.position.z = 0.02; robot.add(fov);
-  const halo = new THREE.Mesh(new THREE.RingGeometry(0.3, 0.36, 48), new THREE.MeshBasicMaterial({ color: 0x2ee6ff, transparent: true, opacity: 0.8 }));
+  const halo = new THREE.Mesh(new THREE.RingGeometry(0.42, 0.5, 64), new THREE.MeshBasicMaterial({ color: 0x2ee6ff, transparent: true, opacity: 0.8 }));
   halo.position.z = 0.012; robot.add(halo);
   robot.userData.halo = halo;
-  const rl = label('FireScout', 'robot'); rl.position.set(0, 0, 0.5); robot.add(rl);
+  const rl = label('FireScout', 'robot'); rl.position.set(0, 0, 0.75); robot.add(rl);
   world.add(robot);
+  // unexplored fog (from the robot's own map) + live radar sweep (its 36 measured ranges)
+  fogPlane = new THREE.Mesh(new THREE.PlaneGeometry(W, H), new THREE.MeshBasicMaterial({ transparent: true, depthWrite: false, opacity: 1 }));
+  fogPlane.position.set(W / 2, H / 2, 0.02); fogPlane.renderOrder = 2; world.add(fogPlane);
+  const rg = new THREE.BufferGeometry(); rg.setAttribute('position', new THREE.BufferAttribute(new Float32Array(36 * 6), 3));
+  radarLines = new THREE.LineSegments(rg, new THREE.LineBasicMaterial({ color: 0x5fd3ff, transparent: true, opacity: 0.28 }));
+  radarLines.frustumCulled = false; world.add(radarLines);
+  const hg = new THREE.BufferGeometry(); hg.setAttribute('position', new THREE.BufferAttribute(new Float32Array(36 * 3), 3));
+  radarHits = new THREE.Points(hg, new THREE.PointsMaterial({ color: 0x9fe8ff, size: 0.07, transparent: true, opacity: 0.9 }));
+  radarHits.frustumCulled = false; world.add(radarHits);
   // room numbers
   sc.rooms.forEach((r, k) => {
     const l = label(`R${k + 1} ${r.kind}`, 'room');
@@ -491,7 +501,7 @@ function updateDynamic(st, t, dt) {
   });
 }
 function updateLegend(st, evac) {
-  const items = [['robot', 'var(--robot)', "Robot's next move"]];
+  const items = [['robot', 'var(--robot)', "Robot's next move"], ['r', 'rgba(95,211,255,.45)', 'Radar rays (live)'], ['f', '#2a2b30', 'Dark = not scanned yet']];
   if (st.crew) items.push(['crew', 'var(--crew)', 'Crew route, rescue order']);
   if (evac) items.push(['crew', 'var(--crew)', 'Person walking out']);
   if (st.exit?.length) items.push(['exit', 'var(--text)', 'Way back to entry']);
@@ -817,6 +827,16 @@ function frame() {
     }
     scene.fog.density = 0.012 + 0.03 * fill;
     updateDynamic(ST, t, dt);
+    if (ST.radar && radarLines) {   // the robot's 36 radar ranges, drawn where it measured them
+      const L = radarLines.geometry.attributes.position.array, P = radarHits.geometry.attributes.position.array;
+      for (let k = 0; k < 36; k++) {
+        const a = smooth.yaw + k * Math.PI / 18, r = ST.radar[k];
+        const ex = smooth.x + r * Math.cos(a), ey = smooth.y + r * Math.sin(a);
+        L.set([smooth.x, smooth.y, 0.14, ex, ey, 0.14], k * 6);
+        P.set(r < 5.9 ? [ex, ey, 0.15] : [smooth.x, smooth.y, -1], k * 3);
+      }
+      radarLines.geometry.attributes.position.needsUpdate = radarHits.geometry.attributes.position.needsUpdate = true;
+    }
     if (view === 'follow') {
       const d = new THREE.Vector3(Math.cos(smooth.yaw), Math.sin(smooth.yaw), 0);
       const want = new THREE.Vector3(smooth.x, smooth.y, 0).addScaledVector(d, -1.8).add(new THREE.Vector3(0, 0, 3.4));
@@ -834,3 +854,26 @@ function frame() {
 }
 resize();
 frame();
+
+// unexplored fog texture: refreshed from the robot's own scanned-area map
+const fogImg = new Image();
+fogImg.onload = fogImg.onerror = () => {
+  if (fogImg.naturalWidth && fogPlane) {
+    const t = new THREE.Texture(fogImg); t.needsUpdate = true; t.magFilter = THREE.LinearFilter; t.colorSpace = THREE.SRGBColorSpace;
+    fogPlane.material.map?.dispose(); fogPlane.material.map = t; fogPlane.material.needsUpdate = true;
+  }
+  setTimeout(() => { fogImg.src = `/feed/fog.png?${Date.now()}`; }, 700);
+};
+fogImg.src = '/feed/fog.png';
+
+// VLA advisory: a vision-language model describes the current frame for the IC. It never feeds the robot's decisions.
+$('#b-vla').onclick = async () => {
+  const out = $('#vla-out'), btn = $('#b-vla');
+  const feed = feedName === 'map' ? 'thermal' : feedName;
+  btn.disabled = true; out.hidden = false; out.textContent = 'Asking the AI about the ' + feed + ' camera...';
+  try {
+    const r = await (await fetch('/api/vla', { method: 'POST', body: JSON.stringify({ feed }) })).json();
+    out.innerHTML = `<b>AI advisory${r.model ? ' · ' + esc(r.model) + ' · ' + r.ms + ' ms' : ''} · not used by the robot</b>${esc(r.text)}`;
+  } catch { out.textContent = 'AI advisory unavailable (no connection).'; }
+  btn.disabled = false;
+};

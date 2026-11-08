@@ -83,11 +83,23 @@ def baseline_time(L: scene.Layout, crew_delay_s: float = CREW_DELAY_S, speed_mps
     return None
 
 
-def run_episode(seed: int, t_max: float = 180.0) -> dict:
+TUNABLE = ('VERIFY_CONF', 'REJECT_CONF', 'PIN_CONF', 'BREATH_SAMPLES', 'BREATH_RANGE', 'VERIFY_TIMEOUT', 'SPEED')
+
+
+def run_episode(seed: int, t_max: float = 180.0, params: dict | None = None, weights: list | None = None,
+                dataset: bool = False) -> dict:
+    """One unseen floor. `params` overrides agent thresholds (tuning sweeps), `weights` sets the person detector,
+    `dataset` also returns every warm track's features + ground-truth label (training data for the detector)."""
+    for k, v in (params or {}).items():
+        if k not in TUNABLE:
+            raise ValueError(f'not tunable: {k}')
+        setattr(B, k, type(getattr(B, k))(v))
     L = scene.generate_layout(seed)
     m, d = scene.load(L)
     s = sensors.Sensors(m, d, L, seed=seed, render_rgb=False)
     b = B.Brain(L.width, L.height, L.start, feedback_path='nul')
+    if weights is not None:
+        b.cal.w = np.array(weights, float)
     cas = [t.xy for t in L.things if t.kind == 'casualty']
     cmd = B.Command(0, 0, 0)
     steps = int(round(DT / m.opt.timestep))
@@ -115,7 +127,11 @@ def run_episode(seed: int, t_max: float = 180.0) -> dict:
                 scanned_pct=round(100 * (b.grid.scanned & (b.grid.occ == 0)).sum() / max(1, (b.grid.occ == 0).sum()), 1),
                 loop_ms_p50=round(float(np.percentile(lat, 50)), 1), loop_ms_p95=round(float(np.percentile(lat, 95)), 1),
                 baseline_t=(lambda bt: None if bt is None else round(bt, 1))(baseline_time(L)),
-                never_clear=not any('clear' in str(c).lower() for c in b.cards))
+                never_clear=not any('clear' in str(c).lower() for c in b.cards),
+                guard_stops=b.guard_stops,
+                rows=[{'f': B.Calibrator.features(tr).round(4).tolist(),
+                       'y': int(any(math.dist(tr.xy, c) <= FOUND_M for c in cas))}
+                      for tr in b.tracker.tracks if tr.kind == 'warm' and len(tr.hits) >= 3] if dataset else None)
 
 
 def summarize(rows: list[dict]) -> str:

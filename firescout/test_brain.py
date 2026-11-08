@@ -379,3 +379,24 @@ def test_detector_learning_persists_across_missions(tmp_path):
     b.feedback(1, False)
     b2 = Brain(12, 8, (0.6, 4.0), feedback_path=str(tmp_path / 'fb.jsonl'), weights_path=str(wfile))  # next mission
     assert abs(b2.cal.conf(tr) - b.cal.conf(tr)) < 1e-5 and b2.cal.conf(tr) < before
+
+
+def test_voice_not_matched_to_body_at_wrong_distance():
+    b = Brain(12, 8, (2.0, 4.0))
+    near = _pinned(b, (3.0, 4.0), responsive=False)        # unconscious body 1 m ahead
+    b.step(obs(t=0.0, pose=(2.0, 4.0, 0.0), voices=[(0.0, 46.0)]))   # 46 dB ~ 16 m away, same bearing
+    assert not near.responsive
+
+
+def test_unanswered_evacuation_goes_back_to_p1():
+    b = Brain(12, 8, (1.0, 4.0))
+    b.grid.occ[:] = 0
+    tr = _pinned(b, (5.0, 4.0), responsive=True)
+    b.step(obs(t=0.0, pose=(3.5, 4.0, 0.0)))
+    assert tr.instruct == 'EVACUATE'
+    for k in range(1, 35):                                # 34 s later, still lying in the same place
+        tr.hits.append(True)
+        b.step(obs(t=float(k), pose=(3.5, 4.0, 0.0)))
+    assert tr.instruct == 'NO_RESPONSE' and b.priority(tr)[0] == 'P1'
+    assert tr in b.rescue_order
+    assert any(c.kind == 'SAY' and 'did not' in c.detail for c in b.cards)
