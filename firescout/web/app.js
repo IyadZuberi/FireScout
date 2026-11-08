@@ -542,6 +542,11 @@ $('#b-new').onclick = () => {
   $('#d-new').showModal();
 };
 $('#n-cancel').onclick = () => $('#d-new').close();
+document.querySelectorAll('.scen button').forEach((b) => b.onclick = () => {
+  const [preset, cas, fires, seed] = b.dataset.s.split(',');
+  post({ action: 'new', preset, casualties: +cas, fires: +fires, seed: +seed });
+  $('#log').innerHTML = ''; $('#d-new').close();
+});
 $('#n-go').onclick = () => {
   post({ action: 'new', preset: $('#n-preset').value, casualties: +$('#n-cas').value, fires: +$('#n-fires').value, seed: +$('#n-seed').value });
   $('#log').innerHTML = ''; $('#d-new').close();

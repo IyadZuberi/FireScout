@@ -83,3 +83,6 @@ dialog input, dialog select { background: #0f1218; color: var(--text); border: 1
 .s1 { color: #ff8a3d; } .s2 { color: #2ee6ff; } .s3 { color: #9cff57; } .s4 { color: #ff7cff; }
 .s5 { color: #ffd84a; } .s6 { color: #b4a7ff; } .s7 { color: #ff5a5a; } .s8 { color: #7fd1ff; }
 @media (max-width: 1100px) { main { grid-template-columns: 1fr; overflow-y: auto; } #stage { height: 60vh; } }
+.scen { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin: 8px 0 4px; width: 520px; }
+.scen button { text-align: left; padding: 10px 12px; }
+.scen b { display: block; } .scen span { color: var(--muted); font-size: 12px; }
