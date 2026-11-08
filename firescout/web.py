@@ -33,7 +33,7 @@ import sensors
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 WEB = os.path.join(HERE, 'web')
-STATE_HZ = 15
+STATE_HZ = 10
 FEED_HZ = 4
 
 
@@ -64,7 +64,11 @@ class Sim:
         self.feeds: dict[str, bytes] = {}
         self.wall0, self.sim0 = time.perf_counter(), self.d.time
         self.heard_window: dict[int, int] = {}
-        self.cards_sent = 0
+        self._slow, self._slow_t = None, -1.0
+        h, w_ = 300, 400
+        yy, xx = np.mgrid[0:h, 0:w_]
+        self._vig = np.clip(1 - 0.55 * (((xx - w_ / 2) / (w_ / 2)) ** 2 + ((yy - h / 2) / (h / 2)) ** 2), 0.25, 1)
+        self._rng = np.random.default_rng(seed)
         self.said: list[tuple[float, str, str]] = []  # (t, kind, text) robot speaker announcements
 
     # ---------------------------------------------------------------- loop
@@ -121,7 +125,10 @@ class Sim:
                 b.ic(a)
             self.msg = f'IC: {a.upper()} sent to robot'
         elif a == 'room':
-            x0, y0, x1, y1, kind = self.rooms[int(c['room'])]
+            k = int(c['room'])
+            if not 0 <= k < len(self.rooms):
+                raise IndexError('no such room')
+            x0, y0, x1, y1, kind = self.rooms[k]
             with self.w.lock:
                 b.ic('SEARCH', area=(x0, y0, x1, y1))
             self.msg = f'IC: search R{int(c["room"]) + 1} ({kind}) first'
@@ -217,8 +224,9 @@ class Sim:
             first = next((c.t for c in b.cards if c.kind == 'PIN'), None)
             lat = np.array(w.lat) if w.lat else np.zeros(1)
             # crew route = entry -> casualties in priority order (what the BA team should do first)
-            crew = None
-            if b._dist is not None and b.rescue_order:
+            slow = d.time - self._slow_t >= 0.5 or self._slow is None   # heavy summaries at 2 Hz
+            crew = self._slow['crew'] if not slow else None
+            if slow and b._dist is not None and b.rescue_order:
                 cost = B.cost_map(g)
                 cur, pts = b.start_cell, [b.start_cell]
                 for tr in b.rescue_order:
@@ -228,6 +236,10 @@ class Sim:
                         pts += leg[1:]
                         cur = tgt
                 crew = path(pts)
+            if slow:
+                self._slow_t = d.time
+                self._slow = {'crew': crew, 'map': self.map_accuracy(g), 'methane': report.methane(b).splitlines(),
+                              'truth': R.truth_score(L, b)}
             new_cards = [R._ascii(str(c)) for c in b.cards[-40:]]
             out.update({
                 'mode': b.mode, 'ic': bool(b.ic_mode or b.ic_area), 'speed': _r(b.speed), 'speed_why': b.speed_why,
@@ -239,9 +251,9 @@ class Sim:
                 'obs': {'self_temp': _r(o.self_temp_c, 0), 'battery': _r(o.battery), 'co': _r(o.gas_ppm, 0),
                         'o2': _r(o.o2_pct, 1), 'comms': o.comms, 'queued': len(b.outbox)},
                 'metrics': {'coverage': _r(cov, 0), 'first': first, 'lat50': _r(np.percentile(lat, 50), 1),
-                            'lat95': _r(np.percentile(lat, 95), 1), 'truth': R.truth_score(L, b),
-                            'map': self.map_accuracy(g), 'crew_in': _r(max(0, R.CREW_ENTRY_S - d.time), 0)},
-                'methane': report.methane(b).splitlines(),
+                            'lat95': _r(np.percentile(lat, 95), 1), 'truth': self._slow['truth'],
+                            'map': self._slow['map'], 'crew_in': _r(max(0, R.CREW_ENTRY_S - d.time), 0)},
+                'methane': self._slow['methane'],
             })
         out['events'], self.events = self.events, []
         return out
@@ -260,11 +272,7 @@ class Sim:
         r.scene.flags[mujoco.mjtRndFlag.mjRND_FOG] = 0
         ir = r.render().astype(np.float32).mean(2)
         ir = np.clip((ir / max(1.0, np.percentile(ir, 99))) ** 0.6 * 255, 0, 255)
-        rng = np.random.default_rng()
-        ir = np.clip(ir + rng.normal(0, 9, ir.shape), 0, 255)
-        yy, xx = np.mgrid[0:ir.shape[0], 0:ir.shape[1]]
-        vig = 1 - 0.55 * (((xx - ir.shape[1] / 2) / (ir.shape[1] / 2)) ** 2 + ((yy - ir.shape[0] / 2) / (ir.shape[0] / 2)) ** 2)
-        ir = ir * np.clip(vig, 0.25, 1)
+        ir = (ir + self._rng.normal(0, 9, ir.shape).astype(np.float32)) * self._vig
         night = np.stack([ir * 0.35, ir, ir * 0.4], -1).astype(np.uint8)
         enc = lambda im: cv2.imencode('.jpg', cv2.cvtColor(im, cv2.COLOR_RGB2BGR), [cv2.IMWRITE_JPEG_QUALITY, 80])[1].tobytes()
         self.feeds['colour'] = enc(colour)
@@ -339,13 +347,29 @@ def make_handler(app: App):
             return super().do_GET()
 
         def do_POST(self):
-            n = int(self.headers.get('Content-Length', 0))
+            # only the console page itself may command the robot (blocks cross-site requests from other tabs)
+            origin = self.headers.get('Origin', '')
+            host = self.headers.get('Host', '')
+            ok_hosts = (f'localhost:{self.server.server_port}', f'127.0.0.1:{self.server.server_port}')
+            if host not in ok_hosts or (origin and origin.split('//', 1)[-1] not in ok_hosts):
+                return self._send(b'forbidden', 'text/plain', 403)
+            n = min(int(self.headers.get('Content-Length', 0) or 0), 4096)
             try:
-                app.cmds.put(json.loads(self.rfile.read(n) or b'{}'))
-            except json.JSONDecodeError:
+                c = json.loads(self.rfile.read(n) or b'{}')
+            except (json.JSONDecodeError, UnicodeDecodeError):
                 return self._send(b'bad json', 'text/plain', 400)
+            if not isinstance(c, dict):
+                return self._send(b'bad command', 'text/plain', 400)
+            app.cmds.put(c)
             self._send(b'{"ok":true}', 'application/json')
     return H
+
+
+def clean_scenario(c: dict) -> dict:
+    """Clamp scenario fields from the browser to what the generator supports."""
+    preset = c.get('preset') if c.get('preset') in scene.PRESETS else 'care_home'
+    return {'preset': preset, 'casualties': min(4, max(0, int(c.get('casualties', 2)))),
+            'fires': min(3, max(1, int(c.get('fires', 1)))), 'seed': min(99999, max(0, int(c.get('seed', 0))))}
 
 
 def serve(cfg, port=8765, quit_after=None):
@@ -368,10 +392,13 @@ def serve(cfg, port=8765, quit_after=None):
         f0 = time.perf_counter()
         while not app.cmds.empty():
             c = app.cmds.get()
-            if c.get('action') == 'new':
-                start({k: c.get(k) for k in ('preset', 'casualties', 'fires', 'seed')})
-            else:
-                app.sim.command(c)
+            try:
+                if c.get('action') == 'new':
+                    start(clean_scenario(c))
+                else:
+                    app.sim.command(c)
+            except (KeyError, ValueError, TypeError, IndexError) as e:  # a bad command never stops the mission
+                app.sim.msg = f'ignored bad command: {e}'
         app.sim.tick()
         now = time.perf_counter()
         if now - last_state >= 1 / STATE_HZ:
