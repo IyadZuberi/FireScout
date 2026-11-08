@@ -40,7 +40,7 @@ DEBUG = False
 
 
 SEM_RGB = {1: (225, 225, 225), 2: (170, 120, 70)}  # wall white, furniture brown
-PRIO_RGB = {'P1': (255, 40, 40), 'P2': (255, 170, 0), 'P?': (255, 230, 0)}
+PRIO_RGB = {'P1': (255, 201, 60), 'P2': (255, 159, 46), 'P?': (255, 230, 120), 'EVAC': (67, 214, 117)}
 
 
 def map_image(b: B.Brain, rooms=None) -> np.ndarray:

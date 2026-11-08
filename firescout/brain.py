@@ -84,10 +84,24 @@ def cost_map(grid: Grid, no_go_c: float = NO_GO_C) -> np.ndarray:
     heat_eff = np.maximum(grid.heat, cv2.GaussianBlur(grid.heat, (0, 0), 0.5 / grid.res))
     cost = 1.0 + np.maximum(0.0, (heat_eff - 40.0) / 50.0) + grid.gas / 500.0
     cost = np.where(grid.occ == -1, 1.5 + cost - 1.0, cost)
-    near_wall = cv2.dilate((grid.occ == 1).astype(np.uint8), np.ones((3, 3), np.uint8)) > 0
-    cost[near_wall] += 6.0  # keep clear of walls (robot radius) but never trap the robot
-    cost[(grid.occ == 1) | (heat_eff > no_go_c)] = np.inf
+    occ = (grid.occ == 1).astype(np.uint8)
+    margin = cv2.dilate(occ, np.ones((5, 5), np.uint8)) > 0
+    cost[margin] += 4.0                                   # prefer the middle of corridors and doorways
+    touching = cv2.dilate(occ, np.ones((3, 3), np.uint8)) > 0
+    cost[touching | (heat_eff > no_go_c)] = np.inf        # robot half-width ~0.2 m: cells next to obstacles forbidden
     return cost.astype(np.float32)
+
+
+def free_escape(cost: np.ndarray, grid: Grid, here) -> None:
+    """If the robot is already inside an inflated cell, let it drive out (never through a real wall or fire)."""
+    if np.isfinite(cost[here]):
+        return
+    i, j = here
+    i0, i1, j0, j1 = max(0, i - 2), i + 3, max(0, j - 2), j + 3
+    blk = cost[i0:i1, j0:j1]
+    wall = grid.occ[i0:i1, j0:j1] == 1
+    hot = grid.heat[i0:i1, j0:j1] > NO_GO_C
+    blk[~np.isfinite(blk) & ~wall & ~hot] = 25.0
 
 
 _NB = [(-1, 0, 1.0), (1, 0, 1.0), (0, -1, 1.0), (0, 1, 1.0),
@@ -469,6 +483,7 @@ class Brain:
         self.ic_area = None              # (x0, y0, x1, y1) IC-ordered search area
         self.speed = 0.0
         self.speed_why = ''
+        self.guard_stops = 0   # ticks where the proximity guard cut motion (shown in evaluation)
         self.rescue_order: list[Track] = []
         self._last_hear = -99.0
         self.say_out: list[dict] = []   # speaker instructions for the world (sim) to deliver
@@ -688,11 +703,12 @@ class Brain:
 
         # ---- safety gate + planning
         cost = cost_map(g)
+        free_escape(cost, g, here)
         blocked = any(not np.isfinite(cost[c]) for c in self.path)
         if self._dist is None or blocked or self._ticks % 5 == 1:  # 4 Hz global plan, instant on block
             self._dist, self._parent = dijkstra(cost, here)
         dist, parent = self._dist, self._parent
-        cmd = self._plan(obs, cost, dist, parent, here)
+        cmd = self._guard(self._plan(obs, cost, dist, parent, here), obs)
         if self._ticks % 10 == 1 and dist is not None:
             self.exit_path = unwind(parent, self.start_cell) if np.isfinite(dist[self.start_cell]) else None
             self._update_rescue(cost, dist, here)
@@ -919,6 +935,26 @@ class Brain:
             if self.grid_los(c, tgt):
                 return c
         return None
+
+    def _guard(self, cmd: Command, obs) -> Command:
+        """Reactive proximity stop (radar ring, every tick): never drive into anything closer than 0.45 m from the
+        robot centre (hull half-length 0.23 m); push gently away inside 0.32 m. Overrides any plan or IC order."""
+        v = np.array([cmd.vx, cmd.vy], float)
+        ang = obs.pose[2] + np.radians(np.arange(len(obs.ranges)) * 360.0 / len(obs.ranges))
+        dirs = np.stack([np.cos(ang), np.sin(ang)], 1)
+        hit = False
+        for d, r in zip(dirs, obs.ranges):
+            if r >= 0.45:
+                continue
+            into = float(v @ d)
+            if into > 0:
+                v -= into * d
+                hit = True
+            if r < 0.32:
+                v -= 0.12 * d
+        if hit:
+            self.guard_stops += 1
+        return Command(float(v[0]), float(v[1]), cmd.wz, cmd.want_breath_xy)
 
     def _pick_speed(self, x, y) -> tuple[float, str]:
         """Fast where the next 3 m are mapped, scanned and cool; slow near heat or a casualty; normal otherwise."""

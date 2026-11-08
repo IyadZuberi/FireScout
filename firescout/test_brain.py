@@ -120,7 +120,7 @@ def test_tracker_associates_and_counts_misses():
 
 
 # ---------------- Task 5: brain loop
-from brain import Brain, Card
+from brain import Brain, Card, Command
 from sensors import Observation
 
 
@@ -348,3 +348,23 @@ def test_speaker_evacuates_when_route_safe_else_shelters():
     b2.step(obs(pose=(4.5, 4.0, 0.0)))
     assert tr2.instruct == 'SHELTER' and b2.say_out[-1]['route'] is None
     assert any(c.kind == 'SAY' and 'stay put' in c.change for c in b2.cards)
+
+
+def test_proximity_guard_stops_motion_into_close_obstacle():
+    b = Brain(12, 8, (2.0, 4.0))
+    rng = np.full(36, 6.0, np.float32)
+    rng[0] = 0.3                                  # wall 0.3 m straight ahead (ray 0 = heading)
+    cmd = b._guard(Command(0.4, 0.0, 0.0), obs(pose=(2.0, 4.0, 0.0), ranges=rng))
+    assert cmd.vx <= 0.0                          # never pushes into it
+    side = b._guard(Command(0.0, 0.4, 0.0), obs(pose=(2.0, 4.0, 0.0), ranges=rng))
+    assert side.vy > 0.3                          # free directions untouched
+
+
+def test_planner_keeps_robot_radius_from_walls():
+    from brain import cost_map
+    g = Grid(4, 4)
+    g.occ[:] = 0
+    g.occ[8, :] = 1                               # wall across the middle (y = 2.0-2.25 m)
+    c = cost_map(g)
+    assert not np.isfinite(c[7, 3]) and not np.isfinite(c[9, 3])   # cells touching the wall are forbidden
+    assert np.isfinite(c[6, 3])

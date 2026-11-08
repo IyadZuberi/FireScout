@@ -449,8 +449,11 @@ def serve(cfg, port=8765, quit_after=None):
             app.state = json.dumps(st).encode()
             last_state = now
         if now - last_feed >= 1 / FEED_HZ:
-            app.sim.render_feeds()
-            app.feeds = dict(app.sim.feeds)
+            try:  # a display bug must never stop the mission
+                app.sim.render_feeds()
+                app.feeds = dict(app.sim.feeds)
+            except Exception as e:  # noqa: BLE001
+                print('feed error:', repr(e), flush=True)
             last_feed = now
         time.sleep(max(0.0, 1 / 120 - (time.perf_counter() - f0)))
     with app.sim.w.lock:
