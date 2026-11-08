@@ -205,7 +205,9 @@ def test_no_breath_keeps_possible_not_dropped():
     for k in range(20):
         b.step(obs(t=0.25 + k * 0.05, pose=(2.0, 4.0, 0.0), thermal=th, depth=dp, breath=0.1))
     tr = [t for t in b.tracker.tracks if t.kind == 'warm'][0]
-    assert tr.state == 'verify' and tr.breath is not None  # POSSIBLE, still reported
+    assert tr.state in ('candidate', 'verify') and tr.verify_tries == 1  # kept, re-checked from another angle
+    assert any(c.kind == 'POSSIBLE' and 'another angle' in c.change for c in b.cards)
+    assert b._near(tr.xy, b._dist, avoid=tr.verify_from) is None or         math.dist(b.grid.to_world(*b._near(tr.xy, b._dist, avoid=tr.verify_from)), tr.verify_from) > 1.2
 
 
 # ---------------- Task 9: should-tier

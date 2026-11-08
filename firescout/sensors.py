@@ -186,9 +186,9 @@ class Sensors:
                 out.append((math.atan2(math.sin(b), math.cos(b)), db))
         return out
 
-    def _los(self, a, b):
+    def _los(self, a, b, z: float = 0.15):
         """True if nothing but the target thing / free space lies between a and b."""
-        pnt = np.array([a[0], a[1], 0.15])
+        pnt = np.array([a[0], a[1], z])
         vec = np.array([b[0] - a[0], b[1] - a[1], 0.0])
         dist = float(np.linalg.norm(vec))
         gid = np.array([-1], dtype=np.int32)
@@ -199,8 +199,21 @@ class Sensors:
         rxy = self._robot_xy()
         ok = False
         for i, t in enumerate(self.layout.things):
-            if t.breathing and math.dist(self._thing_xy(i), target) <= 1.0:  # radar beam footprint on a 1.7 m body
-                ok = math.dist(rxy, target) <= BREATH_RANGE and self._los(rxy, target)
+            if not t.breathing:
+                continue
+            # body = 1.7 m segment along its yaw; the radar beam (0.8 m footprint) must land on some part of it
+            c = np.array(self._thing_xy(i))
+            ax = 0.85 * np.array([math.cos(t.yaw), math.sin(t.yaw)])
+            tgt = np.array(target)
+            k = float(np.clip(np.dot(tgt - c, ax) / np.dot(ax, ax), -1, 1))
+            if np.linalg.norm(tgt - (c + k * ax)) > 0.8:
+                continue
+            r = np.array(rxy)
+            kr = float(np.clip(np.dot(r - c, ax) / np.dot(ax, ax), -1, 1))
+            near_pt = tuple(c + kr * ax)  # closest body point to the robot
+            if math.dist(rxy, near_pt) <= BREATH_RANGE and (self._los(rxy, near_pt, 0.15) or
+                                                            self._los(rxy, near_pt, 0.3)):
+                ok = True
         base = 0.85 if ok else 0.10
         return float(np.clip(base + self.rng.normal(0, 0.05), 0, 1))
 

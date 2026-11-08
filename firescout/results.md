@@ -1,52 +1,52 @@
 # FireScout evaluation (simulation, unseen procedurally generated floors)
 
-Episodes: 30 floors · 25 casualties · 180 s robot mission each.
+Episodes: 30 floors · 37 casualties · 180 s robot mission each.
 Baseline assumptions: crew enters after **150 s** (BA don + entry control), right-hand wall-following crawl at **0.3 m/s** with a 1.5 m sweep reach (zero visibility, no thermal camera; a crew with a TIC would be faster).
 Ground truth is used only for scoring; the robot never sees it. These are simulated results, not real-world performance.
 
 | Metric | Result |
 |---|---|
-| Time to first confirmed casualty, FireScout | 17 s (IQR 5-25) (10/18 floors) |
-| Time to first casualty, wall-following crew baseline | 232 s (IQR 207-285) |
-| Casualty recall (confirmed pins) | 9/25 = 36% (95% CI 20%-55%) |
-| Pin precision | 9/9 = 100% (95% CI 70%-100%) |
-| Unconfirmed "POSSIBLE" casualties flagged for crew | 28 |
+| Time to first confirmed casualty, FireScout | 37 s (IQR 22-66) (8/21 floors) |
+| Time to first casualty, wall-following crew baseline | 229 s (IQR 216-282) |
+| Casualty recall (confirmed pins) | 11/37 = 30% (95% CI 17%-46%) |
+| Pin precision | 11/12 = 92% (95% CI 65%-99%) |
+| Unconfirmed "POSSIBLE" casualties flagged for crew | 83 |
 | Heat-limit breaches (robot within 0.8 m of a fire) | 0 ticks |
-| Any card/report claiming an area is clear | 0 (by design) |
-| Thermal scan coverage (median) | 101% of mapped free space |
-| Brain loop latency p50 / p95 (laptop CPU) | 2.2 / 48.4 ms |
+| Any card/report claiming an area is clear | VIOLATION |
+| Thermal scan coverage (median) | 87% of mapped free space |
+| Brain loop latency p50 / p95 (laptop CPU) | 3.2 / 50.2 ms |
 
 ## Per floor
 
 | seed | casualties | found | FireScout t (s) | baseline t (s) | false pins | possible | breaches | scanned % |
 |---|---|---|---|---|---|---|---|---|
-| 0 | 2 | 1 | 18.6 | 190.0 | 0 | 1 | 0 | 67.8 |
-| 1 | 0 | 0 | None | None | 0 | 1 | 0 | 102.4 |
-| 2 | 0 | 0 | None | None | 0 | 1 | 0 | 106.9 |
-| 3 | 0 | 0 | None | None | 0 | 1 | 0 | 111.7 |
-| 4 | 2 | 0 | None | 219.2 | 0 | 1 | 0 | 100.7 |
-| 5 | 1 | 1 | 25.2 | 340.0 | 0 | 0 | 0 | 113.0 |
-| 6 | 0 | 0 | None | None | 0 | 2 | 0 | 104.4 |
-| 7 | 1 | 0 | None | 191.7 | 0 | 1 | 0 | 82.1 |
-| 8 | 0 | 0 | None | None | 0 | 1 | 0 | 104.6 |
-| 9 | 0 | 0 | None | None | 0 | 0 | 0 | 116.3 |
-| 10 | 0 | 0 | None | None | 0 | 0 | 0 | 109.1 |
-| 11 | 1 | 1 | 24.8 | 287.5 | 0 | 1 | 0 | 108.5 |
-| 12 | 0 | 0 | None | None | 0 | 1 | 0 | 111.1 |
-| 13 | 2 | 0 | None | 189.2 | 0 | 0 | 0 | 72.4 |
-| 14 | 0 | 0 | None | None | 0 | 0 | 0 | 70.1 |
-| 15 | 2 | 1 | 4.9 | 232.5 | 0 | 1 | 0 | 109.3 |
-| 16 | 1 | 0 | None | 327.5 | 0 | 0 | 0 | 78.7 |
-| 17 | 1 | 1 | 2.3 | 252.5 | 0 | 1 | 0 | 72.1 |
-| 18 | 2 | 0 | None | 223.3 | 0 | 1 | 0 | 72.9 |
-| 19 | 1 | 1 | 5.7 | 301.7 | 0 | 1 | 0 | 80.9 |
-| 20 | 1 | 0 | None | 322.5 | 0 | 1 | 0 | 95.4 |
-| 21 | 0 | 0 | None | None | 0 | 1 | 0 | 87.9 |
-| 22 | 1 | 0 | None | 207.5 | 0 | 1 | 0 | 104.2 |
-| 23 | 1 | 1 | 176.7 | 278.3 | 0 | 0 | 0 | 79.4 |
-| 24 | 0 | 0 | None | None | 0 | 1 | 0 | 110.1 |
-| 25 | 2 | 1 | 51.4 | 201.7 | 0 | 2 | 0 | 101.1 |
-| 26 | 1 | 1 | 3.6 | 275.0 | 0 | 0 | 0 | 97.0 |
-| 27 | 2 | 0 | 15.4 | 232.5 | 0 | 3 | 0 | 103.3 |
-| 28 | 0 | 0 | None | None | 0 | 2 | 0 | 87.0 |
-| 29 | 1 | 0 | None | 206.7 | 0 | 2 | 0 | 82.9 |
+| 0 | 2 | 2 | 58.3 | 282.5 | 0 | 2 | 0 | 86.3 |
+| 1 | 0 | 0 | None | None | 0 | 2 | 0 | 93.2 |
+| 2 | 1 | 0 | None | 288.3 | 0 | 5 | 0 | 83.0 |
+| 3 | 2 | 2 | 22.3 | 242.5 | 1 | 4 | 0 | 97.7 |
+| 4 | 2 | 0 | None | 295.0 | 0 | 1 | 0 | 68.9 |
+| 5 | 2 | 0 | None | 215.8 | 0 | 2 | 0 | 85.1 |
+| 6 | 2 | 1 | 43.3 | 220.0 | 0 | 2 | 0 | 94.7 |
+| 7 | 1 | 1 | 88.3 | 321.7 | 0 | 1 | 0 | 98.5 |
+| 8 | 2 | 0 | None | 226.7 | 0 | 2 | 0 | 69.3 |
+| 9 | 2 | 1 | 21.8 | 240.0 | 0 | 2 | 0 | 93.1 |
+| 10 | 2 | 0 | None | 192.5 | 0 | 5 | 0 | 92.9 |
+| 11 | 0 | 0 | None | None | 0 | 6 | 0 | 83.3 |
+| 12 | 1 | 0 | None | 321.7 | 0 | 4 | 0 | 84.8 |
+| 13 | 2 | 0 | None | 210.0 | 0 | 4 | 0 | 77.2 |
+| 14 | 1 | 0 | None | 324.2 | 0 | 6 | 0 | 67.9 |
+| 15 | 0 | 0 | None | None | 0 | 4 | 0 | 87.8 |
+| 16 | 2 | 2 | 29.8 | 246.7 | 0 | 1 | 0 | 91.7 |
+| 17 | 2 | 0 | None | 216.7 | 0 | 4 | 0 | 64.7 |
+| 18 | 2 | 0 | None | 219.2 | 0 | 4 | 0 | 57.6 |
+| 19 | 2 | 0 | None | 229.2 | 0 | 3 | 0 | 86.0 |
+| 20 | 0 | 0 | None | None | 0 | 1 | 0 | 95.9 |
+| 21 | 2 | 0 | None | 201.7 | 0 | 5 | 0 | 84.0 |
+| 22 | 0 | 0 | None | None | 0 | 0 | 0 | 98.6 |
+| 23 | 0 | 0 | None | None | 0 | 1 | 0 | 96.3 |
+| 24 | 2 | 0 | None | 194.2 | 0 | 3 | 0 | 66.5 |
+| 25 | 0 | 0 | None | None | 0 | 0 | 0 | 89.8 |
+| 26 | 0 | 0 | None | None | 0 | 0 | 0 | 65.9 |
+| 27 | 0 | 0 | None | None | 0 | 4 | 0 | 98.1 |
+| 28 | 2 | 1 | 95.4 | 214.2 | 0 | 4 | 0 | 98.6 |
+| 29 | 1 | 1 | 8.1 | 235.8 | 0 | 1 | 0 | 96.7 |

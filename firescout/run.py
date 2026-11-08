@@ -395,7 +395,7 @@ def hud_image(b: B.Brain, o, w, truth: dict, msg: str, building: str = '') -> np
         ('Brain loop', f'p50 {np.percentile(lat, 50):.1f} ms  p95 {np.percentile(lat, 95):.1f} ms  (on-device)',
          WHITE),
         ('Fire seats', f'{len(b.fires)} located', amber if b.fires else WHITE),
-        ('Floor scanned', f'{cov:.0f}%  (never declared clear)', WHITE),
+        ('Floor scanned', f'{cov:.0f}%  (never declared empty)', WHITE),
         ('First casualty', 'searching' if first is None else
          f'T+{int(first) // 60}:{int(first) % 60:02d}  ({CREW_ENTRY_S - first:.0f}s before crew)', green),
         ('Confirmed', f'{len(pinned)}  (thermal + radar breathing)', red if pinned else WHITE),

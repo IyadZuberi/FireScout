@@ -378,7 +378,8 @@ def build_mjcf(layout: Layout) -> str:
                      f'specular="0.3 0.15 0.05" attenuation="1 0.25 0.5" castshadow="false"/>')
         things.append(
             f'<body name="thing{i}" pos="{_f(t.xy[0], t.xy[1], 0.01)}" euler="0 0 {math.degrees(t.yaw):.3g}">\n'
-            f'      <freejoint/>\n      {light}\n      {_thing_geoms(i, t, rng, meta)}\n    </body>')
+            f'      {"" if t.kind == "casualty" else "<freejoint/>"}\n      {light}\n'
+            f'      {_thing_geoms(i, t, rng, meta)}\n    </body>')  # casualties static: posed meshes must not roll
     smoke = []
     fires = [t.xy for t in layout.things if t.kind == 'fire'] or [(W / 2, H / 2)]
     for k in range(N_SMOKE):

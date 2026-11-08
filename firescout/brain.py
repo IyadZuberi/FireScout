@@ -243,6 +243,8 @@ class Track:
     first_seen: float = 0.0
     breath_n: int = 0
     responsive: bool = False   # heard calling (mic bearing matched this track)
+    verify_tries: int = 0
+    verify_from: tuple | None = None  # where the last breath check was taken from
     priority: str = ''
 
 
@@ -646,6 +648,13 @@ class Brain:
                         self.emit('PIN', 'thermal+radar', f'casualty#{tr.id} at ({tr.xy[0]:.1f},{tr.xy[1]:.1f}) '
                                   f'conf {tr.conf:.2f} breathing {tr.breath:.2f}', 'added to rescue route',
                                   'two-sensor-confirm')
+                    elif tr.verify_tries < 2 and tr.conf >= VERIFY_CONF:  # second opinion from another angle
+                        tr.verify_tries += 1
+                        tr.verify_from = (obs.pose[0], obs.pose[1])
+                        self.emit('POSSIBLE', 'radar', f'track#{tr.id} conf {tr.conf:.2f} breathing {tr.breath:.2f}',
+                                  're-checking from another angle', 'never-drop-candidate')
+                        tr.state, tr.breath, tr.breath_n = 'candidate', None, 0
+                        self._verify_fail[tr.id] = self.t - 8.0
                     else:
                         tr.state = 'verify'
                         self.emit('POSSIBLE', 'radar', f'track#{tr.id} conf {tr.conf:.2f} breathing {tr.breath:.2f}',
@@ -774,7 +783,7 @@ class Brain:
         if vt is not None and vt.state in ('pinned', 'rejected'):
             self.verify_id, vt = None, None
         if vt is not None and self.t - self._verify_t0 > VERIFY_TIMEOUT and vt.breath_n < BREATH_SAMPLES:
-            self.emit('POSSIBLE', 'thermal', f'track#{vt.id} conf {vt.conf:.2f}, no clear radar line of sight '
+            self.emit('POSSIBLE', 'thermal', f'track#{vt.id} conf {vt.conf:.2f}, no radar line of sight '
                       f'in {VERIFY_TIMEOUT:.0f}s', 'kept as POSSIBLE casualty, exploring on', 'verify-timeout')
             vt.state = 'candidate'
             self._verify_fail[vt.id] = self.t
@@ -784,7 +793,7 @@ class Brain:
             if math.dist((x, y), vt.xy) <= BREATH_RANGE and self.grid_los(here, g.to_cell(*vt.xy)):
                 face = math.atan2(vt.xy[1] - y, vt.xy[0] - x)
                 return Command(0.0, 0.0, float(np.clip(2.0 * _wrap(face - yaw), -1.5, 1.5)), vt.xy)
-            target = self._near(vt.xy, dist)
+            target = self._near(vt.xy, dist, avoid=vt.verify_from)
             if target is not None:
                 return self._drive_to(target, obs, cost, dist, parent)
             vt.state = 'candidate'  # unreachable for now: retry later, never dropped
@@ -856,12 +865,15 @@ class Brain:
         """No known wall cell between a and b on the robot's own map."""
         return all(self.grid.occ[c] != 1 for c in _line(a, b)[1:-1] if self.grid.inside(*c))
 
-    def _near(self, xy, dist):
-        """Reachable free cell 1-2 m from xy with line of sight to it (for a second look)."""
+    def _near(self, xy, dist, avoid=None):
+        """Reachable free cell 1-2 m from xy with line of sight to it (for a second look), >1.2 m from `avoid`."""
         if dist is None:
             return None
         d = np.hypot(self._cx - xy[0], self._cy - xy[1])
-        cand = np.where((d >= 1.0) & (d <= 2.0) & np.isfinite(dist), dist, np.inf)
+        ok = (d >= 1.0) & (d <= 2.0) & np.isfinite(dist)
+        if avoid is not None:
+            ok &= np.hypot(self._cx - avoid[0], self._cy - avoid[1]) > 1.2
+        cand = np.where(ok, dist, np.inf)
         tgt = self.grid.to_cell(*xy)
         order = np.argsort(cand, axis=None)[:80]
         for flat in order:
