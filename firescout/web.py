@@ -435,8 +435,9 @@ def make_handler(app: App):
         def do_POST(self):
             if urlparse(self.path).path == '/api/vla':
                 ok_hosts = (f'localhost:{self.server.server_port}', f'127.0.0.1:{self.server.server_port}')
-                if self.headers.get('Host', '') not in ok_hosts:
-                    return self._send(b'forbidden', 'text/plain', 403)
+                origin = self.headers.get('Origin', '')
+                if self.headers.get('Host', '') not in ok_hosts or (origin and origin.split('//', 1)[-1] not in ok_hosts):
+                    return self._send(b'forbidden', 'text/plain', 403)   # only the console page may spend AI credits
                 n = min(int(self.headers.get('Content-Length', 0) or 0), 256)
                 try:
                     feed = json.loads(self.rfile.read(n) or b'{}').get('feed', 'thermal')
