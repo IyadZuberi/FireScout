@@ -1,0 +1,26 @@
+{
+  "detector": {
+    "ignoreRules": [],
+    "ignoreFiles": [],
+    "ignoreValues": [
+      {
+        "rule": "oversized-h1",
+        "value": "*",
+        "files": [
+          "docs/summary.html"
+        ],
+        "createdAt": "2026-11-08T01:58:18.151Z",
+        "reason": "Claude triage: print A4 one-pager, h1 is 17pt 'FireScout' with a small inline subtitle, not a display hero"
+      },
+      {
+        "rule": "cramped-padding",
+        "value": "*",
+        "files": [
+          "firescout/web/index.html"
+        ],
+        "createdAt": "2026-11-08T02:40:04.359Z",
+        "reason": "Claude triage: .strip cells are full-height dividers with vertically centred text, not flush text"
+      }
+    ]
+  }
+}

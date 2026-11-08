@@ -9,7 +9,8 @@
   /* night command-unit palette: warm-neutral charcoal, one meaning per signal colour */
   --bg: #0f0f10; --panel: #17171a; --raised: #202024; --line: #2c2c31; --line-2: #3a3a40;
   --text: #ecebe8; --text-2: #b9b7b1; --text-3: #8f8d87;
-  --fire: #ff4d3d;      /* fire and danger only */
+  --fire: #ff4d3d;      /* fire and danger only (text / lines) */
+  --fire-fill: #c4271b; /* filled surfaces carrying white text (AA contrast) */
   --person: #ffc93c;    /* people (P1 brightest) */
   --person-2: #ff9f2e;  /* P2 */
   --crew: #43d675;      /* BA crew route, evacuating occupants */
@@ -53,7 +54,7 @@ select, input { font: inherit; color: var(--text); background: var(--raised); bo
 .pill { padding: 6px 12px; border-radius: 999px; border: 1px solid var(--line-2); font-weight: 600; font-size: 14px; white-space: nowrap; }
 .pill.ok { color: var(--robot); border-color: #2c5a6b; }
 .pill.warn { color: #111; background: var(--person); border-color: var(--person); }
-.pill.bad { color: #fff; background: var(--fire); border-color: var(--fire); }
+.pill.bad { color: #fff; background: var(--fire-fill); border-color: var(--fire-fill); }
 .menu { margin-left: auto; display: flex; gap: 6px; }
 .menu button { min-height: 40px; font-size: 14px; }
 
@@ -115,17 +116,16 @@ main { display: grid; grid-template-columns: 320px 1fr 380px; height: calc(100% 
 .legend { position: absolute; bottom: 12px; left: 12px; display: flex; gap: 14px; flex-wrap: wrap; max-width: calc(100% - 24px);
   background: rgba(15,15,16,.88); padding: 8px 12px; border-radius: var(--r); font-size: 13px; color: var(--text-2); }
 .legend i { display: inline-block; width: 18px; height: 4px; border-radius: 2px; margin-right: 6px; vertical-align: middle; }
-.legend i.dash { background: repeating-linear-gradient(90deg, currentColor 0 5px, transparent 5px 9px) !important; height: 3px; }
-.clickhint { position: absolute; top: 60px; left: 50%; transform: translateX(-50%); background: var(--fire); color: #fff;
+.clickhint { position: absolute; top: 60px; left: 50%; transform: translateX(-50%); background: var(--fire-fill); color: #fff;
   padding: 10px 16px; border-radius: var(--r); font-weight: 600; }
-.lost { position: absolute; top: 60px; right: 12px; background: var(--fire); color: #fff; padding: 10px 14px; border-radius: var(--r);
+.lost { position: absolute; top: 60px; right: 12px; background: var(--fire-fill); color: #fff; padding: 10px 14px; border-radius: var(--r);
   display: flex; flex-direction: column; max-width: 340px; }
 .lost span { font-size: 14px; }
 .lbl { padding: 4px 9px; border-radius: 4px; font-size: 13px; font-weight: 600; color: #111; white-space: nowrap; background: var(--text); }
 .lbl.person { background: var(--person); } .lbl.person.P2 { background: var(--person-2); }
 .lbl.person.Pq { background: rgba(15,15,16,.85); color: var(--person); border: 1px dashed var(--person); }
 .lbl.person.EVAC { background: var(--crew); }
-.lbl.fire { background: var(--fire); color: #fff; }
+.lbl.fire { background: var(--fire-fill); color: #fff; }
 .lbl.robot { background: rgba(15,15,16,.85); color: var(--robot); border: 1px solid var(--robot); }
 .lbl.room { background: transparent; color: rgba(236,235,232,.6); font-weight: 500; text-shadow: 0 1px 3px #000; }
 .lbl.entry { background: rgba(15,15,16,.85); color: var(--crew); border: 1px solid var(--crew); }
@@ -142,7 +142,7 @@ main { display: grid; grid-template-columns: 320px 1fr 380px; height: calc(100% 
   padding: 4px 8px; border-radius: 4px; }
 .feed .age { position: absolute; right: 8px; bottom: 8px; font: 12px PlexMono, monospace; color: #ddd; background: rgba(0,0,0,.65);
   padding: 4px 6px; border-radius: 4px; }
-.feed .age.stale { background: var(--fire); color: #fff; }
+.feed .age.stale { background: var(--fire-fill); color: #fff; }
 .readings { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 14px; margin: 10px 0 0; }
 .readings div { min-width: 0; }
 .readings dt { font-size: 12px; color: var(--text-3); text-transform: uppercase; letter-spacing: .04em; }
