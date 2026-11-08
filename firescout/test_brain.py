@@ -394,9 +394,9 @@ def test_unanswered_evacuation_goes_back_to_p1():
     tr = _pinned(b, (5.0, 4.0), responsive=True)
     b.step(obs(t=0.0, pose=(3.5, 4.0, 0.0)))
     assert tr.instruct == 'EVACUATE'
+    th, dp = person_frame()                               # thermal still sees the body where it was
     for k in range(1, 35):                                # 34 s later, still lying in the same place
-        tr.hits.append(True)
-        b.step(obs(t=float(k), pose=(3.5, 4.0, 0.0)))
+        b.step(obs(t=float(k), pose=(3.5, 4.0, 0.0), thermal=th, depth=dp))
     assert tr.instruct == 'NO_RESPONSE' and b.priority(tr)[0] == 'P1'
     assert tr in b.rescue_order
     assert any(c.kind == 'SAY' and 'did not' in c.detail for c in b.cards)
