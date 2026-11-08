@@ -120,8 +120,8 @@ class World:
     def __init__(self, m, d, L, s: sensors.Sensors):
         self.m, self.d, self.L, self.s = m, d, L, s
         self.lights = {i: mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_LIGHT, f'firelight{i}')
-                       for i, t in enumerate(L.things) if t.kind == 'fire'}
-        self.base_diffuse = {i: m.light_diffuse[l].copy() for i, l in self.lights.items()}
+                       for i, t in enumerate(L.things) if t.kind in ('fire', 'spare')}
+        self.base_diffuse = {i: np.array([1.6, 0.75, 0.15]) for i in self.lights}
         self.flames = [g for g in range(m.ngeom) if m.geom_matid[g] >= 0 and
                        (mujoco.mj_id2name(m, mujoco.mjtObj.mjOBJ_MATERIAL, m.geom_matid[g]) or '').startswith('flame')]
         self.base_size = {g: m.geom_size[g].copy() for g in self.flames}
@@ -130,7 +130,7 @@ class World:
         self.char = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_MATERIAL, 'char')
         self.bed = {}  # fire thing -> its char/ember geoms (grow with the fire)
         for i, t in enumerate(L.things):
-            if t.kind == 'fire':
+            if t.kind in ('fire', 'spare'):
                 gs = [g for g in np.where(m.geom_bodyid == s.thing_body[i])[0] if g not in self.base_size]
                 self.bed[i] = {int(g): m.geom_size[g].copy() for g in gs}
         self.base_temp = dict(s.temp_by_thing)
@@ -188,6 +188,17 @@ class World:
     def growth(self, i: int) -> float:
         return min(1.0, max(0.0, (self.d.time - self.t_lit[i]) / FIRE_GROW_S)) if i in self.t_lit else 0.0
 
+    def fire_at(self, xy) -> str:
+        """Unscripted change: start a new fire at any point the IC / a judge clicks."""
+        spare = next((i for i, t in enumerate(self.L.things) if t.kind == 'spare'
+                      and self.s.temp_by_thing[i] < sensors.FIRE_MIN_C), None)
+        if spare is None:
+            return 'no more fires available'
+        mid = self.m.body_mocapid[self.s.thing_body[spare]]
+        self.d.mocap_pos[mid] = [xy[0], xy[1], 0.01]
+        mujoco.mj_forward(self.m, self.d)
+        return self.ignite(spare, 520.0).replace(self.L.things[spare].name, f'new fire at ({xy[0]:.1f}, {xy[1]:.1f})')
+
     def ignite(self, i: int, temp=450.0) -> str:
         t = self.L.things[i]
         if self.s.temp_by_thing[i] >= sensors.FIRE_MIN_C or t.kind == 'casualty':
@@ -216,7 +227,8 @@ class World:
     def animate(self, t: float):
         self.move_people(t)
         for i, lid in self.lights.items():
-            self.m.light_diffuse[lid] = self.base_diffuse[i] * (1 + 1.2 * self.growth(i)) * \
+            lit = self.s.temp_by_thing[i] >= sensors.FIRE_MIN_C
+            self.m.light_diffuse[lid] = lit * self.base_diffuse[i] * (1 + 1.2 * self.growth(i)) * \
                 (0.7 + 0.3 * math.sin(t * 17 + i) * self.rng.random())
         for g in self.flames:  # tongues: spread out, stretch and flicker independently
             gr = self.growth(int(self.flame_thing[g]))

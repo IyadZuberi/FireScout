@@ -22,7 +22,8 @@ WALL_T = 0.12
 CORRIDOR = (3.2, 4.8)  # y-span of the central corridor
 DOOR_W = 1.0
 N_SMOKE = 60
-N_TONGUES = 12   # flame tongues per fire (animated + grown by run.World)
+N_TONGUES = 12
+N_SPARE = 2      # unscripted fires the IC / a judge can start at any clicked point   # flame tongues per fire (animated + grown by run.World)
 # Building presets the judges can pick. Rooms are listed north row first, then south row.
 PRESETS = {
     'flat': {'name': '2-bed flat', 'width': 9.0,
@@ -66,7 +67,7 @@ def human_meta() -> dict:
 @dataclass
 class Thing:
     name: str
-    kind: Literal['fire', 'casualty', 'decoy', 'shelf']
+    kind: Literal['fire', 'casualty', 'decoy', 'shelf', 'spare']  # spare = hidden fire a judge can start anywhere
     xy: tuple[float, float]
     size: tuple[float, float, float]
     temp_c: float
@@ -241,6 +242,8 @@ def generate_layout(seed: int, preset: str = 'care_home', n_casualties: int | No
         style, size, temp = decoys[int(i)]
         place('decoy', size, temp, style=style)
     place('shelf', (0.4, 0.82, 1.36), 20.0, room_ok=False)
+    for k in range(N_SPARE):  # parked outside the building, cold and invisible until "start a fire here"
+        things.append(Thing(f'spare{len(things)}', 'spare', (-3.0 - 2.0 * k, -3.0), (0.6, 0.6, 0.9), 20.0))
     return Layout(W, H, walls, things, start, seed, rooms, props, preset, kinds)
 
 
@@ -289,11 +292,13 @@ def _thing_geoms(i: int, t: Thing, rng, meta) -> str:
         attrs = ' '.join(f'{key}="{val}"' for key, val in a.items())
         g.append(f'<geom name="thing{i}_g{k}" {attrs}/>')
 
-    if t.kind == 'fire':  # burning debris pile + layered flames (animated by run.py)
-        add(type='box', size=_f(0.32, 0.28, 0.06), pos=_f(0, 0, 0.06), euler='0 0 12', material='char')
-        add(type='box', size=_f(0.2, 0.08, 0.05), pos=_f(0.12, 0.1, 0.15), euler='0 25 40', material='char')
-        add(type='ellipsoid', size=_f(0.3, 0.3, 0.06), pos=_f(0, 0, 0.12), material='ember', contype='0', conaffinity='0')
-        _tongues(add, rng, 0.0, '1')
+    if t.kind in ('fire', 'spare'):  # burning debris pile + flame tongues (animated by run.py); spare hidden (group 4)
+        grp = '4' if t.kind == 'spare' else '0'
+        add(type='box', size=_f(0.32, 0.28, 0.06), pos=_f(0, 0, 0.06), euler='0 0 12', material='char', group=grp)
+        add(type='box', size=_f(0.2, 0.08, 0.05), pos=_f(0.12, 0.1, 0.15), euler='0 25 40', material='char', group=grp)
+        add(type='ellipsoid', size=_f(0.3, 0.3, 0.06), pos=_f(0, 0, 0.12), material='ember', contype='0', conaffinity='0',
+            group=grp)
+        _tongues(add, rng, 0.0, '4' if t.kind == 'spare' else '1')
     elif t.kind == 'casualty' and t.style:
         v, outfit, hair = t.style.split('|')
         add(type='mesh', mesh=f'human_{v}', material=f'cloth_{outfit}')
@@ -376,11 +381,12 @@ def build_mjcf(layout: Layout) -> str:
     things = []
     for i, t in enumerate(layout.things):
         light = ''
-        if t.kind == 'fire':
-            light = (f'<light name="firelight{i}" type="point" pos="0 0 1.0" diffuse="1.6 0.75 0.15" '
+        if t.kind in ('fire', 'spare'):
+            light = (f'<light name="firelight{i}" type="point" pos="0 0 1.0" '
+                     f'diffuse="{"0 0 0" if t.kind == "spare" else "1.6 0.75 0.15"}" '
                      f'specular="0.3 0.15 0.05" attenuation="1 0.25 0.5" castshadow="false"/>')
-        mocap = ' mocap="true"' if t.awake else ''  # awake occupants are moved by run.World
-        joint = '' if t.kind == 'casualty' else '<freejoint/>'  # casualties static: posed meshes must not roll
+        mocap = ' mocap="true"' if t.awake or t.kind == 'spare' else ''  # moved by run.World
+        joint = '' if t.kind in ('casualty', 'spare') else '<freejoint/>'  # casualties static: posed meshes must not roll
         things.append(
             f'<body name="thing{i}" pos="{_f(t.xy[0], t.xy[1], 0.01)}" euler="0 0 {math.degrees(t.yaw):.3g}"{mocap}>\n'
             f'      {joint}\n      {light}\n'

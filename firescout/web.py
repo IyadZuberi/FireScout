@@ -116,6 +116,38 @@ class Sim:
                 db = max(db for _, db in o.voices)
                 self.events.append({'sound': f'{"help" if win % 2 else "here"}_{sex}', 'db': _r(db, 0)})
 
+    def room_of(self, xy) -> str:
+        for k, (x0, y0, x1, y1, kind) in enumerate(self.rooms):
+            if x0 <= xy[0] <= x1 and y0 <= xy[1] <= y1:
+                return f'R{k + 1} {kind}'
+        return 'corridor'
+
+    def now_sentence(self, b, o) -> tuple[str, str]:
+        """(what, why) the agent is doing right now, in plain English, from its own state."""
+        g = b.grid
+        if b.mode == 'IC_STOP':
+            return 'Stopped by the Incident Commander', 'sensors and reporting keep running'
+        if b.mode == 'RECALL':
+            return 'Returning to the entry', 'Incident Commander ordered a recall'
+        if b.mode == 'RETREAT':
+            return 'Backing away from heat', f'robot body at {o.self_temp_c:.0f} C (limit 60 C) or a no-go cell nearby'
+        if b.mode == 'VERIFY' and b.verify_id:
+            tr = b.track(b.verify_id)
+            if tr is not None:
+                return (f'Checking possible person #{tr.id} in {self.room_of(tr.xy)}',
+                        f'thermal says body-like ({tr.conf:.0%}); moving for a clear radar view to detect breathing')
+        if b.mode == 'RETURN_COMMS':
+            return 'Driving back into radio range', 'radio lost: uploading queued findings'
+        if b.mode == 'HOLD':
+            return 'Holding position', 'nowhere left it can reach; a human search is still required'
+        if b.voice_hint and b.t - b.voice_hint[3] < 8:
+            return 'Heading towards a voice', f'microphones heard a call at bearing {math.degrees(b.voice_hint[2]):.0f} deg'
+        if b.ic_area:
+            return 'Searching the room the IC chose first', 'Incident Commander priority'
+        tgt = g.to_world(*b.goal) if b.goal else None
+        where = self.room_of(tgt) if tgt else 'the building'
+        return f'Exploring {where}', 'nearest area its cameras have not checked yet'
+
     # ---------------------------------------------------------------- IC commands
     def command(self, c: dict):
         a = c.get('action')
@@ -132,6 +164,11 @@ class Sim:
             with self.w.lock:
                 b.ic('SEARCH', area=(x0, y0, x1, y1))
             self.msg = f'IC: search R{int(c["room"]) + 1} ({kind}) first'
+        elif a == 'fire_at':
+            x, y = float(c['x']), float(c['y'])
+            if not (0.3 <= x <= self.L.width - 0.3 and 0.3 <= y <= self.L.height - 0.3):
+                raise ValueError('outside the building')
+            self.msg = 'TEST: ' + self.world.fire_at((x, y))
         elif a == 'ignite_shelf':
             self.msg = self.world.ignite(self.shelf) or self.msg
         elif a == 'ignite_random':
@@ -216,6 +253,7 @@ class Sim:
                 if tr.instruct == 'EVACUATE':
                     lab, why = 'EVAC', b.priority(tr)[2]
                 tracks.append({'id': tr.id, 'xy': (_r(tr.xy[0]), _r(tr.xy[1])), 'state': tr.state, 'prio': lab,
+                               'room': self.room_of(tr.xy),
                                'say': {'EVACUATE': 'walk out the way I came in', 'SHELTER': 'stay put, get low'}.get(
                                    tr.instruct or '', ''),
                                'why': why, 'conf': _r(tr.conf), 'responsive': tr.responsive,
@@ -244,8 +282,10 @@ class Sim:
             out.update({
                 'mode': b.mode, 'ic': bool(b.ic_mode or b.ic_area), 'speed': _r(b.speed), 'speed_why': b.speed_why,
                 'path': path(b.path), 'exit': path(b.exit_path or []), 'crew': crew,
-                'fires': [(_r(f[0]), _r(f[1]), _r(f[2], 0)) for f in b.fires],
+                'fires': [(_r(f[0]), _r(f[1]), _r(f[2], 0), self.room_of(f)) for f in b.fires],
+                'now': self.now_sentence(b, o),
                 'tracks': tracks,
+                'robot_room': self.room_of((rx, ry)),
                 'voice': (list(map(_r, b.voice_hint[:3])) if b.voice_hint and b.t - b.voice_hint[3] < 4 else None),
                 'cards': new_cards,
                 'obs': {'self_temp': _r(o.self_temp_c, 0), 'battery': _r(o.battery), 'co': _r(o.gas_ppm, 0),

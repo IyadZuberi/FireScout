@@ -11,7 +11,7 @@ import { CSS2DRenderer, CSS2DObject } from 'three/addons/renderers/CSS2DRenderer
 THREE.Object3D.DEFAULT_UP.set(0, 0, 1);
 const $ = (s) => document.querySelector(s);
 const post = (body) => fetch('/api/cmd', { method: 'POST', body: JSON.stringify(body) });
-const PRIO = { P1: 0xff3b30, P2: 0xffa424, 'P?': 0xffe14a, EVAC: 0x38ff7a };
+const PRIO = { P1: 0xffc93c, P2: 0xff9f2e, 'P?': 0xffc93c, EVAC: 0x43d675 };
 const prioClass = (p) => (p === 'P?' ? 'Pq' : p);
 const AWAKE_POSES = ['standing', 'kneel', 'walk0', 'walk1', 'walk2', 'walk3'];
 
@@ -105,21 +105,23 @@ function vinylTexture() {
 const FIRE_VS = `attribute float aSize; attribute float aLife; varying float vLife;
 void main(){ vLife=aLife; vec4 mv=modelViewMatrix*vec4(position,1.0); gl_PointSize=aSize*(420.0/-mv.z); gl_Position=projectionMatrix*mv; }`;
 const FIRE_FS = `varying float vLife;
-void main(){ float d=length(gl_PointCoord-0.5); float a=smoothstep(0.5,0.05,d);
- vec3 c=mix(vec3(1.0,0.93,0.65),vec3(1.0,0.5,0.1),smoothstep(0.0,0.3,vLife));
- c=mix(c,vec3(0.75,0.12,0.03),smoothstep(0.3,0.75,vLife));
- float al=a*(1.0-vLife)*0.7; gl_FragColor=vec4(c*al*1.15,al); }`;
+void main(){ vec2 p=gl_PointCoord-0.5; p.y+=0.12;                     // tall teardrop flame, wide at the base
+ float w=0.5-0.32*clamp(-p.y+0.5,0.0,1.0)*0.9; float d=length(vec2(p.x/max(w,0.08)*0.5,p.y*0.95));
+ float a=smoothstep(0.5,0.12,d);
+ vec3 c=mix(vec3(1.0,0.86,0.45),vec3(1.0,0.46,0.07),smoothstep(0.0,0.28,vLife));
+ c=mix(c,vec3(0.62,0.1,0.02),smoothstep(0.28,0.8,vLife));
+ float al=a*(1.0-vLife)*0.75; gl_FragColor=vec4(c*al*0.95,al); }`;
 const SMOKE_VS = FIRE_VS;
 const SMOKE_FS = `varying float vLife; uniform sampler2D map;
 void main(){ float d=length(gl_PointCoord-0.5); float a=smoothstep(0.5,0.0,d);
- float al=a*0.16*smoothstep(0.0,0.15,vLife)*(1.0-vLife); gl_FragColor=vec4(vec3(0.13,0.13,0.14),al); }`;
+ float al=a*0.26*smoothstep(0.0,0.12,vLife)*(1.0-vLife); gl_FragColor=vec4(vec3(0.09,0.09,0.1),al); }`;
 
 class Fire {
   constructor(x, y, z0) {
     this.x = x; this.y = y; this.z0 = z0; this.growth = 0; this.on = true;
     this.group = new THREE.Group();
-    this.flame = this._points(520, FIRE_VS, FIRE_FS, THREE.AdditiveBlending);
-    this.smoke = this._points(160, SMOKE_VS, SMOKE_FS, THREE.NormalBlending);
+    this.flame = this._points(700, FIRE_VS, FIRE_FS, THREE.AdditiveBlending);
+    this.smoke = this._points(260, SMOKE_VS, SMOKE_FS, THREE.NormalBlending);
     this.light = new THREE.PointLight(0xff7a2a, 3, 6, 2);
     this.light.position.set(x, y, z0 + 0.8);
     this.light.castShadow = true;
@@ -148,7 +150,7 @@ class Fire {
     s.vel[k * 3] = (Math.random() - 0.5) * 0.15; s.vel[k * 3 + 1] = (Math.random() - 0.5) * 0.15; s.vel[k * 3 + 2] = up;
     s.max[k] = s.smoke ? 5 + Math.random() * 5 : 0.45 + Math.random() * 0.6;
     s.age[k] = pre * s.max[k];
-    s.base[k] = s.smoke ? 1.2 + Math.random() : (0.1 + Math.random() * 0.14) * (1 + 0.8 * this.growth);
+    s.base[k] = s.smoke ? 1.2 + Math.random() : (0.14 + Math.random() * 0.18) * (1 + 0.8 * this.growth);
   }
   update(dt, t, showSmoke) {
     this.group.visible = this.on;
@@ -226,7 +228,8 @@ export function buildRobot(withLabels = false) {
 // ------------------------------------------------------------------ world (rebuilt per scenario)
 let world = null, SC = null, robot = null, fires = {}, thingMeshes = {}, smokeLayer = null, mapTexPlane = null;
 const dyn = new THREE.Group(); scene.add(dyn);   // routes, markers: rebuilt from state
-let showSmoke = true, showTruth = false, view = 'over';
+let showSmoke = true, view = 'over';
+const CUT_H = 1.1;  // walls drawn cut away at 1.1 m so people and the robot stay visible (sim walls are 2.4 m)
 
 async function buildWorld(sc) {
   SC = sc;
@@ -240,11 +243,14 @@ async function buildWorld(sc) {
   floor.position.set(W / 2, H / 2, 0); floor.receiveShadow = true; world.add(floor);
   const plaster = new THREE.MeshStandardMaterial({ color: 0xd8d2c6, roughness: 0.92 });
   const skirt = new THREE.MeshStandardMaterial({ color: 0x5a554e, roughness: 0.7 });
+  const capMat = new THREE.MeshBasicMaterial({ color: 0x1b1b1e });  // cut face of the wall
   for (const [x0, y0, x1, y1] of sc.walls) {
     const len = Math.hypot(x1 - x0, y1 - y0);
     if (len < 0.01) continue;
-    const w = new THREE.Mesh(new THREE.BoxGeometry(len + sc.wall_t, sc.wall_t, sc.wall_h), plaster);
-    w.position.set((x0 + x1) / 2, (y0 + y1) / 2, sc.wall_h / 2);
+    const w = new THREE.Mesh(new THREE.BoxGeometry(len + sc.wall_t, sc.wall_t, CUT_H), plaster);  // cutaway
+    w.position.set((x0 + x1) / 2, (y0 + y1) / 2, CUT_H / 2);
+    const cap = new THREE.Mesh(new THREE.BoxGeometry(len + sc.wall_t, sc.wall_t + 0.004, 0.01), capMat);
+    cap.position.set(w.position.x, w.position.y, CUT_H + 0.005); cap.rotation.z = Math.atan2(y1 - y0, x1 - x0); world.add(cap);
     w.rotation.z = Math.atan2(y1 - y0, x1 - x0);
     w.castShadow = w.receiveShadow = true; world.add(w);
     const s = new THREE.Mesh(new THREE.BoxGeometry(len + sc.wall_t + 0.01, sc.wall_t + 0.012, 0.1), skirt);
@@ -253,7 +259,7 @@ async function buildWorld(sc) {
   // robot-built map painted on the floor (toggle "Robot map")
   mapTexPlane = new THREE.Mesh(new THREE.PlaneGeometry(W, H),
     new THREE.MeshBasicMaterial({ transparent: true, opacity: 0.55, depthWrite: false }));
-  mapTexPlane.position.set(W / 2, H / 2, 0.015); mapTexPlane.visible = showTruth; world.add(mapTexPlane);
+  mapTexPlane.position.set(W / 2, H / 2, 0.015); mapTexPlane.visible = showFloorMap; world.add(mapTexPlane);
   for (const p of sc.props) {
     loadOBJ(`/assets/${p.key}.obj`).then((o) => {
       const m = o.clone();
@@ -280,8 +286,8 @@ async function buildWorld(sc) {
   const spot = new THREE.SpotLight(0xfff4dc, 6, 9, 0.5, 0.6, 1.4);
   spot.position.set(0.14, 0, 0.3); spot.target.position.set(2, 0, 0); spot.castShadow = true;
   robot.add(spot, spot.target);
-  const fov = new THREE.Mesh(new THREE.CircleGeometry(4, 32, -0.497, 0.995),
-    new THREE.MeshBasicMaterial({ color: 0xff9a3d, transparent: true, opacity: 0.09, depthWrite: false }));
+  const fov = new THREE.Mesh(new THREE.CircleGeometry(4 / 1.6, 32, -0.497, 0.995),   // 4 m thermal range (robot drawn 1.6x)
+    new THREE.MeshBasicMaterial({ color: 0x5fd3ff, transparent: true, opacity: 0.07, depthWrite: false }));
   fov.position.z = 0.02; robot.add(fov);
   const halo = new THREE.Mesh(new THREE.RingGeometry(0.3, 0.36, 48), new THREE.MeshBasicMaterial({ color: 0x2ee6ff, transparent: true, opacity: 0.8 }));
   halo.position.z = 0.012; robot.add(halo);
@@ -290,13 +296,13 @@ async function buildWorld(sc) {
   world.add(robot);
   // room numbers
   sc.rooms.forEach((r, k) => {
-    const l = label(`R${k + 1} ${r.kind}`, ''); l.element.style.opacity = 0.7;
+    const l = label(`R${k + 1} ${r.kind}`, 'room');
     l.position.set(r.box[0] + 0.7, r.box[3] - 0.35, 2.45); world.add(l);
   });
-  const ent = label('ENTRY / BA control', ''); ent.position.set(sc.start[0], sc.start[1], 0.3); world.add(ent);
-  setView(view, true);
-  buildICButtons();
-  $('#c-building').textContent = `${sc.name} · ${sc.width}x${sc.height} m · seed ${sc.seed}`;
+  const ent = label('Entry · BA control', 'entry'); ent.position.set(sc.start[0], sc.start[1], 0.3); world.add(ent);
+  setView(view);
+  buildRoomPicker();
+  $('#h-scenario').textContent = `${sc.name} · ${sc.width} x ${sc.height} m · layout ${sc.seed}`;
 }
 
 async function addThing(t) {
@@ -328,7 +334,7 @@ async function addThing(t) {
     b.traverse((c) => { if (c.isMesh) { c.material = bm; c.castShadow = c.receiveShadow = true; } });
     h.traverse((c) => { if (c.isMesh) { c.material = hmat; c.castShadow = true; } });
     g.add(b, h);
-  } else if (t.kind === 'fire') {
+  } else if (t.kind === 'fire' || t.kind === 'spare') {
     const char = new THREE.MeshStandardMaterial({ color: 0x15100c, roughness: 1 });
     for (let k = 0; k < 6; k++) {
       const m = new THREE.Mesh(new THREE.BoxGeometry(0.5 * Math.random() + 0.2, 0.08, 0.06), char);
@@ -338,6 +344,7 @@ async function addThing(t) {
     const ember = new THREE.Mesh(new THREE.CircleGeometry(0.4, 24), new THREE.MeshBasicMaterial({ color: 0xff4a0a }));
     ember.position.z = 0.012; g.add(ember); g.userData.ember = ember;
     fires[t.i] = new Fire(t.xy[0], t.xy[1], 0); world.add(fires[t.i].group);
+    if (t.kind === 'spare') { fires[t.i].on = false; g.visible = false; g.userData.spare = true; }
   } else if (t.kind === 'shelf') {
     const o = (await loadOBJ('/assets/cabinet.obj')).clone();
     o.traverse((c) => { if (c.isMesh) { c.material = new THREE.MeshStandardMaterial({ color: 0x8a7a66, roughness: 0.7 }); c.castShadow = true; } });
@@ -360,153 +367,231 @@ async function addThing(t) {
 }
 
 // ------------------------------------------------------------------ routes + markers from state
-function tube(pts, color, r, z) {
+const COL = { robot: 0x5fd3ff, crew: 0x43d675, exit: 0xecebe8, fire: 0xff4d3d, voice: 0xc08cff, evac: 0x43d675 };
+function tube(pts, color, r, z, opacity = 1) {
   if (!pts || pts.length < 2) return null;
   const v = pts.map((p) => new THREE.Vector3(p[0], p[1], z));
   const curve = new THREE.CatmullRomCurve3(v, false, 'centripetal');
-  const m = new THREE.Mesh(new THREE.TubeGeometry(curve, Math.max(8, v.length * 3), r, 8, false),
-    new THREE.MeshBasicMaterial({ color, toneMapped: false }));
-  m.userData.curve = curve;
+  const geo = new THREE.TubeGeometry(curve, Math.max(8, v.length * 3), r, 8, false);
+  const m = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ color, toneMapped: false, transparent: opacity < 1, opacity }));
+  m.userData = { curve, grow: 0, total: geo.index.count };   // draws on when the plan changes
+  geo.setDrawRange(0, 0);
   return m;
 }
-let lastRoutes = '', crewArrows = [];
-function updateDynamic(st, t) {
+let lastRoutes = '', crewArrows = [], pings = [];
+const seenTracks = new Set();
+function ping(x, y, color) {   // expanding ring when something new is found
+  const m = new THREE.Mesh(new THREE.RingGeometry(0.2, 0.28, 48), new THREE.MeshBasicMaterial({ color, transparent: true, toneMapped: false }));
+  m.position.set(x, y, 0.05); m.userData.age = 0; scene.add(m); pings.push(m);
+}
+function updateDynamic(st, t, dt) {
   const evac = (st.things || []).filter((x) => x.route && x.route.length > 1).map((x) => x.route);
   const key = JSON.stringify([st.path, st.crew, st.exit, st.fires, st.tracks, st.voice, evac.map((r) => r.length)]);
   if (key !== lastRoutes) {
     lastRoutes = key;
     for (const c of [...dyn.children]) { dyn.remove(c); c.geometry?.dispose?.(); }
     crewArrows = [];
-    const p = tube(st.path, 0x2ee6ff, 0.025, 0.06); if (p) dyn.add(p);
-    const e = tube(st.exit, 0xffffff, 0.015, 0.035); if (e) { e.material.transparent = true; e.material.opacity = 0.55; dyn.add(e); }
-    const c = tube(st.crew, 0x38ff7a, 0.05, 0.09);
+    const p = tube(st.path, COL.robot, 0.022, 0.06); if (p) dyn.add(p);
+    const e = tube(st.exit, COL.exit, 0.014, 0.035, 0.45); if (e) dyn.add(e);
+    const c = tube(st.crew, COL.crew, 0.05, 0.09);
     if (c) {
       dyn.add(c);
       for (let k = 0; k < 10; k++) {
-        const a = new THREE.Mesh(new THREE.ConeGeometry(0.08, 0.22, 12), new THREE.MeshBasicMaterial({ color: 0xb8ffcf, toneMapped: false }));
+        const a = new THREE.Mesh(new THREE.ConeGeometry(0.08, 0.22, 12), new THREE.MeshBasicMaterial({ color: 0xc9ffd9, toneMapped: false }));
         a.userData = { curve: c.userData.curve, off: k / 10 }; dyn.add(a); crewArrows.push(a);
       }
     }
     for (const f of st.fires || []) {
-      const zone = new THREE.Mesh(new THREE.CircleGeometry(1.0, 40), new THREE.MeshBasicMaterial({ color: 0xff2a10, transparent: true, opacity: 0.18, depthWrite: false }));
+      const zone = new THREE.Mesh(new THREE.CircleGeometry(1.0, 40), new THREE.MeshBasicMaterial({ color: COL.fire, transparent: true, opacity: 0.16, depthWrite: false }));
       zone.position.set(f[0], f[1], 0.02); dyn.add(zone);
-      const ring = new THREE.Mesh(new THREE.RingGeometry(0.95, 1.05, 48), new THREE.MeshBasicMaterial({ color: 0xff4a3a, toneMapped: false }));
+      const ring = new THREE.Mesh(new THREE.RingGeometry(0.95, 1.05, 48), new THREE.MeshBasicMaterial({ color: COL.fire, toneMapped: false }));
       ring.position.set(f[0], f[1], 0.025); dyn.add(ring);
-      const l = label(`FIRE ${f[2]}C · NO-GO`, 'fire'); l.position.set(f[0], f[1], 1.9); dyn.add(l);
+      const l = label(`Fire ${f[2]} C · ${f[3]} · no-go`, 'fire'); l.position.set(f[0], f[1], 1.9); dyn.add(l);
     }
     for (const tr of st.tracks || []) {
-      const col = PRIO[tr.prio] ?? 0xffe14a;
+      const col = PRIO[tr.prio] ?? PRIO['P?'];
       const beam = new THREE.Mesh(new THREE.CylinderGeometry(0.012, 0.012, 1.2, 8), new THREE.MeshBasicMaterial({ color: col, toneMapped: false }));
       beam.rotation.x = Math.PI / 2; beam.position.set(tr.xy[0], tr.xy[1], 0.6); dyn.add(beam);
       const ball = new THREE.Mesh(new THREE.SphereGeometry(0.08, 16, 12), new THREE.MeshBasicMaterial({ color: col, toneMapped: false }));
       ball.position.set(tr.xy[0], tr.xy[1], 1.25); ball.userData.pulse = true; dyn.add(ball);
-      const txt = tr.prio === 'EVAC' ? `#${tr.id} told to walk out` :
-        tr.state === 'pinned' ? `${tr.prio} #${tr.id}${tr.rank ? ' · rescue ' + tr.rank : ''}${tr.say ? ' · told: ' + tr.say : tr.responsive ? ' · calling' : ''}`
-        : `possible #${tr.id} · checking`;
-      const l = label(txt, prioClass(tr.prio)); l.position.set(tr.xy[0], tr.xy[1], 1.5); dyn.add(l);
+      const txt = tr.prio === 'EVAC' ? `#${tr.id} walking out` : tr.state === 'pinned'
+        ? `${tr.prio} · #${tr.id}${tr.rank ? ' · rescue ' + tr.rank : ''}` : `Possible #${tr.id} · checking`;
+      const l = label(txt, 'person ' + prioClass(tr.prio)); l.position.set(tr.xy[0], tr.xy[1], 1.5); dyn.add(l);
+      if (!seenTracks.has(tr.id + tr.state)) { seenTracks.add(tr.id + tr.state); ping(tr.xy[0], tr.xy[1], col); }
     }
-    for (const r of evac) { const e2 = tube(r, 0xffe14a, 0.035, 0.08); if (e2) dyn.add(e2); }
+    for (const r of evac) { const e2 = tube(r, COL.evac, 0.03, 0.08); if (e2) dyn.add(e2); }
     if (st.voice) {
       const [x, y, b] = st.voice;
-      const v = tube([[x, y], [x + 4 * Math.cos(b), y + 4 * Math.sin(b)]], 0xff7cff, 0.02, 0.5);
-      if (v) dyn.add(v);
+      const v = tube([[x, y], [x + 4 * Math.cos(b), y + 4 * Math.sin(b)]], COL.voice, 0.02, 0.5); if (v) dyn.add(v);
     }
+    updateLegend(st, evac.length > 0);
+  }
+  for (const c of dyn.children) {
+    const u = c.userData;
+    if (u.total && u.grow < 1) { u.grow = Math.min(1, u.grow + dt / 0.6); c.geometry.setDrawRange(0, Math.floor(u.total * (1 - (1 - u.grow) ** 3) / 3) * 3); }
+    if (u.pulse) c.scale.setScalar(1 + 0.35 * Math.sin(t * 6));
   }
   for (const a of crewArrows) {
-    const u = (a.userData.off + t * 0.08) % 1, c = a.userData.curve;
-    a.position.copy(c.getPointAt(u));
-    const tan = c.getTangentAt(u);
-    a.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), tan);
+    const uu = (a.userData.off + t * 0.08) % 1, c = a.userData.curve;
+    a.position.copy(c.getPointAt(uu));
+    a.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), c.getTangentAt(uu));
   }
-  for (const c of dyn.children) if (c.userData.pulse) c.scale.setScalar(1 + 0.35 * Math.sin(t * 6));
+  pings = pings.filter((p) => {
+    p.userData.age += dt; const a = p.userData.age / 1.4;
+    p.scale.setScalar(1 + 9 * a); p.material.opacity = Math.max(0, 1 - a);
+    if (a >= 1) { scene.remove(p); p.geometry.dispose(); return false; }
+    return true;
+  });
+}
+function updateLegend(st, evac) {
+  const items = [['robot', 'var(--robot)', "Robot's next move"]];
+  if (st.crew) items.push(['crew', 'var(--crew)', 'Crew route, rescue order']);
+  if (evac) items.push(['crew', 'var(--crew)', 'Person walking out']);
+  if (st.exit?.length) items.push(['exit', 'var(--text)', 'Way back to entry']);
+  if (st.fires?.length) items.push(['fire', 'var(--fire)', 'Fire no-go zone']);
+  if (st.tracks?.length) items.push(['p', 'var(--person)', 'People']);
+  if (st.voice) items.push(['v', 'var(--voice)', 'Voice heard']);
+  $('#legend').innerHTML = items.map(([, c, t]) => `<span><i style="background:${c}"></i>${t}</span>`).join('');
 }
 
 // ------------------------------------------------------------------ camera views
-function setView(v, snap = false) {
+function fitOverview() {
+  if (!SC) return;
+  const fov = THREE.MathUtils.degToRad(camera.fov), a = camera.aspect;
+  const need = Math.max((SC.height * 1.15) / 2 / Math.tan(fov / 2), (SC.width * 1.18) / 2 / (Math.tan(fov / 2) * a));
+  const dir = new THREE.Vector3(0, -0.45, 1).normalize();
+  controls.target.set(SC.width / 2, SC.height / 2 + 0.3, 0);
+  camera.position.copy(controls.target).addScaledVector(dir, need);
+}
+function setView(v) {
   view = v;
   document.querySelectorAll('.viewbar [data-v]').forEach((b) => b.classList.toggle('on', b.dataset.v === v));
   controls.enabled = v === 'over';
-  if (v === 'over' && SC) {
-    controls.target.set(SC.width / 2, SC.height / 2, 0);
-    camera.position.set(SC.width / 2, -SC.height * 0.35, Math.max(SC.width * 0.95, SC.height * 1.5));
-    camera.fov = 42; camera.near = 0.05; camera.updateProjectionMatrix();
-  }
-  if (v === 'eye') { camera.fov = 45; camera.near = 0.02; camera.updateProjectionMatrix(); }
-  if (v === 'follow') { camera.fov = 55; camera.near = 0.03; camera.updateProjectionMatrix(); }
+  renderer.toneMappingExposure = v === 'eye' ? 0.8 : 1.05;
+  if (robot) robot.visible = v !== 'eye';
+  camera.fov = { over: 40, follow: 55, eye: 52 }[v]; camera.near = v === 'eye' ? 0.05 : 0.05;
+  camera.updateProjectionMatrix();
+  if (v === 'over') fitOverview();
 }
 document.querySelectorAll('.viewbar [data-v]').forEach((b) => b.onclick = () => setView(b.dataset.v));
-$('#t-smoke').onclick = (e) => { showSmoke = !showSmoke; e.target.classList.toggle('on', showSmoke); };
-$('#t-truth').textContent = 'Robot map on floor';
-$('#t-truth').onclick = (e) => { showTruth = !showTruth; e.target.classList.toggle('on', showTruth); if (mapTexPlane) mapTexPlane.visible = showTruth; };
+addEventListener('resize', () => { if (view === 'over') fitOverview(); });
 
 // ------------------------------------------------------------------ panels
-const LOGCOL = { RETREAT: '#ff6a5a', PIN: '#ff5a50', PRIORITY: '#ff8a6a', REPLAN: '#ffb02e', HEAR: '#ff7cff', IC: '#2ee6ff',
-  COMMS: '#ffb02e', HOLD: '#ffb02e', VERIFY: '#ffe14a', POSSIBLE: '#ffe14a', REJECT: '#8b93a3', LEARN: '#9cff57', SAY: '#ff7cff' };
-function chip(id, text, cls) { const c = $(id); c.textContent = text; c.className = 'chip ' + (cls || ''); }
 const fmt = (s) => `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
+const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
+const MODE_TXT = { EXPLORE: ['Searching', 'ok'], VERIFY: ['Checking a person', 'ok'], RETREAT: ['Retreating from heat', 'warn'],
+  IC_STOP: ['Stopped by IC', 'warn'], RECALL: ['Returning to entry', 'warn'], HOLD: ['Holding', 'warn'],
+  RETURN_COMMS: ['Returning to radio range', 'warn'] };
+const KIND_TXT = { PIN: ['Confirmed a person', 'person'], VERIFY: ['Second look', 'person'], POSSIBLE: ['Possible person', 'person'],
+  PRIORITY: ['Rescue priority', 'person'], REJECT: ['Not a person', ''], REPLAN: ['New route', 'fire'], RETREAT: ['Retreat', 'fire'],
+  HEAR: ['Heard a voice', 'voice'], SAY: ['Spoke to a person', 'voice'], IC: ['IC order', 'ic'], COMMS: ['Radio', 'fire'],
+  HOLD: ['Holding', ''], LEARN: ['Learned from IC', 'ic'] };
+let lastCards = '', lastMsg = '', ackTimer = 0, lastPeople = '';
 
 function updatePanels(st) {
-  chip('#c-clock', 'T+' + fmt(st.t), 'big');
+  $('#h-clock').textContent = fmt(st.t);
   if (!st.obs) return;
-  chip('#c-crew', st.metrics.crew_in > 0 ? `crew enters in ${st.metrics.crew_in}s` : 'crew committed', st.metrics.crew_in > 0 ? '' : 'warn');
-  chip('#c-mode', st.mode + (st.ic ? ' · IC override' : ''), ['RETREAT', 'IC_STOP', 'RECALL', 'HOLD'].includes(st.mode) ? 'warn' : 'ok');
-  chip('#c-radio', st.obs.comms ? 'radio linked' : `radio LOST · ${st.obs.queued} queued`, st.obs.comms ? 'ok' : 'bad');
-  const cas = (st.tracks || []).slice().sort((a, b) => (a.rank ?? 99) - (b.rank ?? 99));
-  $('#casualties').innerHTML = cas.length ? cas.map((c) => `<div class="cas ${prioClass(c.prio)}">
-      <div class="t">${c.state === 'pinned' ? `${c.prio} · casualty #${c.id}` : `Possible person #${c.id}`}${c.rank ? ` · rescue ${c.rank}` : ''}</div>
-      <div class="w">${c.why}${c.state !== 'pinned' ? ' · crew must check' : ''} · (${c.xy[0]}, ${c.xy[1]})</div>
-      ${c.say ? `<div class="say">robot said: "${c.say}"</div>` : ''}</div>`).join('') : '<div class="muted">searching - none found yet</div>';
-  $('#h-fires').textContent = st.fires.length ? st.fires.map((f) => `${f[2]}C`).join(', ') : 'none seen yet';
-  $('#h-air').textContent = `CO ${st.obs.co} ppm · O2 ${st.obs.o2}%`;
-  $('#h-air').style.color = st.obs.co > 400 || st.obs.o2 < 17 ? '#ff6a5a' : '';
-  $('#h-health').textContent = `${st.obs.self_temp}C / 60 · battery ${Math.round(st.obs.battery * 100)}%`;
-  $('#h-mic').textContent = st.voice ? 'VOICE HEARD - heading to it' : 'listening';
-  $('#h-mic').style.color = st.voice ? '#ff7cff' : '';
-  $('#a-speed').textContent = `${st.speed} m/s · ${st.speed_why}`;
-  $('#a-cov').textContent = `${st.metrics.coverage}% (never declared empty)`;
-  $('#a-first').textContent = st.metrics.first == null ? 'searching' : `T+${fmt(st.metrics.first)} (${Math.round(150 - st.metrics.first)}s before crew)`;
-  $('#a-lat').textContent = `p50 ${st.metrics.lat50} ms · p95 ${st.metrics.lat95} ms`;
-  const mp = st.metrics.map;
-  $('#a-map').textContent = mp.precision == null ? '-' : `${mp.walls_found}% walls found · ${mp.precision}% correct`;
-  const tr = st.metrics.truth;
-  $('#a-truth').textContent = `${tr.n} people · ${tr.ok} confirmed · ${tr.fp} false · ${st.evacuated || 0} walked out`;
-  const log = $('#log');
-  if ((st.cards || []).join('|') === lastCards) return finishPanels(st, cas);
-  lastCards = (st.cards || []).join('|');
-  log.innerHTML = '';
-  for (const c of st.cards || []) {
-    const m = c.match(/^\[(\d\d:\d\d)\] (\w+) (.*)$/);
-    const d = document.createElement('div');
-    d.innerHTML = m ? `<span class="muted">${m[1]}</span> <span class="k" style="color:${LOGCOL[m[2]] || '#e8eaf0'}">${m[2]}</span> ${m[3].replace(/</g, '&lt;')}` : c;
-    log.prepend(d);
-  }
-  finishPanels(st, cas);
-}
-let lastCards = '';
-function finishPanels(st, cas) {
-  $('#methane').textContent = (st.methane || []).join('\n');
-  $('#msg').textContent = st.msg || '';
-  // banner: what the crew must handle first
+  const cin = st.metrics.crew_in;
+  $('#h-crew').textContent = cin > 0 ? `in ${cin}s` : 'committed';
+  const [mt, mc] = MODE_TXT[st.mode] || [st.mode, 'ok'];
+  const mode = $('#h-mode'); mode.textContent = mt + (st.ic ? ' · IC order' : ''); mode.className = 'pill ' + mc;
+  const radio = $('#h-radio');
+  radio.textContent = st.obs.comms ? 'Radio linked' : `Radio LOST · ${st.obs.queued} queued`;
+  radio.className = 'pill ' + (st.obs.comms ? 'ok' : 'bad');
+  $('#stage').classList.toggle('lost', !st.obs.comms);
+  $('#lost').hidden = st.obs.comms;
+  if (!st.obs.comms) $('#lost-t').textContent = `Robot keeps searching on its own. ${st.obs.queued} findings queued; screen shows its last upload.`;
+
+  // people (left)
+  const cas = (st.tracks || []).slice().sort((a, b) => (a.rank ?? 99) - (b.rank ?? 99) || (a.prio === 'P?') - (b.prio === 'P?'));
+  $('#p-count').textContent = cas.length;
+  const peopleHtml = cas.length ? cas.map((c) => {
+    const badge = c.prio === 'EVAC' ? 'Walking out' : c.state === 'pinned' ? c.prio : 'Possible';
+    return `<li class="p ${prioClass(c.prio)}"><div class="t"><span class="badge">${badge}</span>
+      <span class="where">${esc(c.room)}${c.rank ? ` · rescue ${c.rank}` : ''}</span></div>
+      <div class="why">${esc(c.why)}${c.state !== 'pinned' && c.prio !== 'EVAC' ? ' · crew must check' : ''}</div>
+      ${c.say ? `<div class="said">Robot told them: "${esc(c.say)}"</div>` : ''}</li>`;
+  }).join('') : '<li class="empty">Searching. People appear here the moment the robot sees them.</li>';
+  if (peopleHtml !== lastPeople) { lastPeople = peopleHtml; $('#people').innerHTML = peopleHtml; }  // re-render only on change
+
+  // strip
   const top = cas.find((c) => c.rank === 1);
-  const b = [];
-  if (top) b.push(`<div class="b">HANDLE FIRST: ${top.prio} casualty #${top.id} - ${top.why}</div>`);
-  if (st.fires.length) { const f = st.fires.slice().sort((a, c) => c[2] - a[2])[0]; b.push(`<div class="b">FIRE ${f[2]}C at (${f[0]}, ${f[1]}) - no-go zone, route avoids it</div>`); }
-  for (const s of st.say || []) b.push(`<div class="b say">ROBOT SPEAKER: "${s}"</div>`);
-  $('#banner').innerHTML = b.join('');
+  $('#s-first').classList.toggle('idle', !top);
+  $('#s-first-t').textContent = top ? `${top.prio} in ${top.room}: ${top.why}` :
+    cas.length ? `${cas.length} possible ${cas.length > 1 ? 'people' : 'person'} - robot is checking for breathing` : 'Searching - no person found yet';
+  const fires = (st.fires || []).slice().sort((a, b) => b[2] - a[2]);
+  $('#s-fire').classList.toggle('idle', !fires.length);
+  $('#s-fire-t').textContent = fires.length ? `Fire ${fires[0][2]} C in ${fires[0][3]}${fires.length > 1 ? ` (+${fires.length - 1} more)` : ''} - routes avoid it` : 'No fire seen yet';
+  const say = (st.say || [])[0];
+  $('#s-say').hidden = !say; if (say) $('#s-say-t').textContent = `Robot speaker: "${say}"`;
+
+  // sense
+  const o = st.obs;
+  const air = $('#r-air'); air.textContent = `CO ${o.co} ppm · O2 ${o.o2}%`; air.className = o.co > 400 || o.o2 < 17 ? 'bad' : '';
+  const body = $('#r-body'); body.textContent = `${o.self_temp} C · battery ${Math.round(o.battery * 100)}%`; body.className = o.self_temp > 50 ? 'bad' : '';
+  const mic = $('#r-mic'); mic.textContent = st.voice ? 'Voice heard' : 'Listening'; mic.className = st.voice ? 'voice' : '';
+  const mp = st.metrics.map;
+  $('#r-map').textContent = mp.precision == null ? '-' : `${mp.walls_found}% of walls`;
+
+  // decide
+  const [now, why] = st.now || ['', ''];
+  $('#d-now').textContent = now; $('#d-why').textContent = why ? `because ${why}` : '';
+  const cards = st.cards || [];
+  if (cards.join('|') !== lastCards) {
+    const old = new Set(lastCards.split('|'));
+    lastCards = cards.join('|');
+    $('#d-list').innerHTML = cards.slice(-7).reverse().map((c) => {
+      const m = c.match(/^\[(\d\d:\d\d)\] (\w+) trigger=(\S+) (.*?) \| (.*?) \| rule=(.*)$/);
+      if (!m) return '';
+      const [kt, kc] = KIND_TXT[m[2]] || [m[2], ''];
+      return `<li class="${old.has(c) ? '' : 'new'}"><span class="t">${m[1]}</span><div><span class="k ${kc}">${kt}:</span>
+        ${esc(m[4])} <span class="why">→ ${esc(m[5])}</span>
+        <details><summary>sensor + rule</summary>sensor: ${esc(m[3])} · rule: ${esc(m[6])}</details></div></li>`;
+    }).join('');
+  }
+
+  // act
+  $('#a-drive').textContent = `${st.speed} m/s · ${st.speed_why.replace(/^\w+: /, '')}`;
+  $('#a-say').textContent = say ? 'speaking now' : (cas.find((c) => c.say) ? 'last: ' + cas.find((c) => c.say).say : 'silent');
+  $('#a-cov').textContent = `${st.metrics.coverage}% of floor`;
+  $('#a-first').textContent = st.metrics.first == null ? 'not yet' : `T+${fmt(st.metrics.first)}, ${Math.round(150 - st.metrics.first)}s before crew`;
+
+  // drawer evaluation + METHANE + IC acknowledgement
+  const tr = st.metrics.truth;
+  $('#eval').innerHTML = [['People in building', tr.n], ['Confirmed correctly', tr.ok], ['False confirmations', tr.fp],
+    ['Walked out', st.evacuated || 0], ['Map walls found', mp.walls_found != null ? mp.walls_found + '%' : '-'],
+    ['Map walls correct', mp.precision != null ? mp.precision + '%' : '-'],
+    ['Brain loop p50 / p95', `${st.metrics.lat50} / ${st.metrics.lat95} ms`], ['Robot is in', st.robot_room || '-']]
+    .map(([k, v]) => `<div><dt>${k}</dt><dd>${esc(v)}</dd></div>`).join('');
+  $('#methane').textContent = (st.methane || []).join('\n');
+  if (st.msg && st.msg !== lastMsg) { lastMsg = st.msg; ack(st.msg); }
+}
+function ack(text) {
+  const a = $('#ack'); a.textContent = text; clearTimeout(ackTimer); ackTimer = setTimeout(() => { a.textContent = ''; }, 6000);
 }
 
-// camera feeds + map
-let feedName = 'thermal';
-const CAP = { thermal: 'LWIR thermal 160x120 - sees bodies and fire through smoke', night: 'Near-IR night vision, 850 nm illuminator',
-  colour: 'Colour camera - blinded by smoke' };
-document.querySelectorAll('#feedtabs button').forEach((b) => b.onclick = () => {
-  feedName = b.dataset.f; document.querySelectorAll('#feedtabs button').forEach((x) => x.classList.toggle('on', x === b));
-  $('#feedcap').textContent = CAP[feedName];
-});
-const feedImg = $('#feed');
-feedImg.onload = feedImg.onerror = () => setTimeout(() => { feedImg.src = `/feed/${feedName}.jpg?${Date.now()}`; }, 180);
+// ------------------------------------------------------------------ sense: camera feeds + map
+let feedName = 'thermal', feedT = 0;
+const CAP = { thermal: 'Thermal camera: body heat and fire, through smoke', night: 'Night IR camera: 850 nm light, sees through thin smoke',
+  colour: 'Colour camera: what a person would see (blinded by smoke)', map: 'Robot-built map (white walls, brown furniture) over the true plan (grey, hidden from the robot)' };
+const feedImg = $('#feed'), mapCanvas = $('#mapc');
+function selectFeed(name) {
+  feedName = name;
+  document.querySelectorAll('#feedtabs button').forEach((x) => x.classList.toggle('on', x.dataset.f === name));
+  $('#feedcap').textContent = CAP[name];
+  feedImg.hidden = name === 'map'; mapCanvas.hidden = name !== 'map';
+  if (name !== 'map') feedImg.src = `/feed/${name}.jpg?${Date.now()}`;
+}
+document.querySelectorAll('#feedtabs button').forEach((b) => b.onclick = () => selectFeed(b.dataset.f));
+feedImg.onload = () => { feedT = performance.now(); setTimeout(() => { if (feedName !== 'map') feedImg.src = `/feed/${feedName}.jpg?${Date.now()}`; }, 200); };
+feedImg.onerror = () => setTimeout(() => { feedImg.src = `/feed/${feedName}.jpg?${Date.now()}`; }, 800);
+feedImg.src = `/feed/thermal.jpg?${Date.now()}`;   // starts the refresh loop
+setInterval(() => {
+  const age = (performance.now() - feedT) / 1000, el = $('#feedage');
+  el.textContent = feedName === 'map' ? 'live' : age < 1.5 ? 'live' : `${age.toFixed(0)}s old`;
+  el.classList.toggle('stale', feedName !== 'map' && age >= 1.5);
+}, 500);
 const mapImg = new Image();
-const mapCanvas = $('#mapc');
 let mapTex = null;
 mapImg.onload = mapImg.onerror = () => {
   if (mapImg.naturalWidth && SC) {
@@ -514,11 +599,11 @@ mapImg.onload = mapImg.onerror = () => {
     c.width = mapImg.naturalWidth; c.height = mapImg.naturalHeight;
     g.drawImage(mapImg, 0, 0);
     const sx = c.width / SC.width, sy = c.height / SC.height;
-    g.strokeStyle = 'rgba(255,90,255,0.85)'; g.lineWidth = 1.5;
+    g.strokeStyle = 'rgba(200,200,200,0.75)'; g.lineWidth = 1.5; g.setLineDash([5, 4]);
     g.beginPath();
     for (const [x0, y0, x1, y1] of SC.walls) { g.moveTo(x0 * sx, c.height - y0 * sy); g.lineTo(x1 * sx, c.height - y1 * sy); }
     g.stroke();
-    if (mapTexPlane && showTruth) {
+    if (mapTexPlane && showFloorMap) {
       mapTex?.dispose(); mapTex = new THREE.CanvasTexture(c); mapTex.colorSpace = THREE.SRGBColorSpace;
       mapTexPlane.material.map = mapTex; mapTexPlane.material.needsUpdate = true;
     }
@@ -527,39 +612,66 @@ mapImg.onload = mapImg.onerror = () => {
 };
 mapImg.src = '/feed/map.jpg';
 
-// IC buttons
+// ------------------------------------------------------------------ command + test controls
 document.querySelectorAll('[data-a]').forEach((b) => b.onclick = () => post({ action: b.dataset.a }));
-function buildICButtons() {
-  $('#rooms').innerHTML = '';
-  SC.rooms.forEach((r, k) => {
-    const b = document.createElement('button'); b.textContent = `R${k + 1} ${r.kind}`;
-    b.onclick = () => post({ action: 'room', room: k }); $('#rooms').append(b);
-  });
+$('#room-pick').onchange = (e) => { if (e.target.value !== '') post({ action: 'room', room: +e.target.value }); };
+function buildRoomPicker() {
+  $('#room-pick').innerHTML = '<option value="">choose a room...</option>' +
+    SC.rooms.map((r, k) => `<option value="${k}">R${k + 1} ${r.kind}</option>`).join('');
 }
+const drawer = $('#drawer');
+$('#b-test').onclick = () => { drawer.hidden = !drawer.hidden; $('#b-test').classList.toggle('on', !drawer.hidden); };
+$('#drawer-x').onclick = () => { drawer.hidden = true; $('#b-test').classList.remove('on'); };
+let showFloorMap = false, armFire = false;
+$('#t-smoke').onclick = (e) => { showSmoke = !showSmoke; e.currentTarget.classList.toggle('on', showSmoke); };
+$('#t-floor').onclick = (e) => { showFloorMap = !showFloorMap; e.currentTarget.classList.toggle('on', showFloorMap); if (mapTexPlane) mapTexPlane.visible = showFloorMap; };
+$('#t-fire-click').onclick = () => { armFire = true; $('#clickhint').hidden = false; setView('over'); };
+const ray = new THREE.Raycaster(), floorPlane = new THREE.Plane(new THREE.Vector3(0, 0, 1), 0);
+canvas.addEventListener('click', (e) => {
+  if (!armFire) return;
+  const r = canvas.getBoundingClientRect();
+  ray.setFromCamera(new THREE.Vector2(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1), camera);
+  const hit = new THREE.Vector3();
+  if (ray.ray.intersectPlane(floorPlane, hit)) { post({ action: 'fire_at', x: hit.x, y: hit.y }); ping(hit.x, hit.y, COL.fire); }
+  armFire = false; $('#clickhint').hidden = true;
+});
+addEventListener('keydown', (e) => {
+  if (e.target.matches('input, select, textarea') || document.querySelector('dialog[open]')) return;
+  const k = e.key.toLowerCase();
+  if (k === 'escape') { armFire = false; $('#clickhint').hidden = true; drawer.hidden = true; }
+  else if (k === 's') post({ action: 'stop' });
+  else if (k === 'r') post({ action: 'recall' });
+  else if (k === 'v') setView({ over: 'follow', follow: 'eye', eye: 'over' }[view]);
+  else if ('1234'.includes(k)) selectFeed(['thermal', 'night', 'colour', 'map'][+k - 1]);
+});
+
 // scenario dialog
 $('#b-new').onclick = () => {
-  const s = $('#n-preset'); s.innerHTML = Object.entries(SC.presets).map(([k, v]) => `<option value="${k}" ${k === SC.preset ? 'selected' : ''}>${v}</option>`).join('');
+  $('#n-preset').innerHTML = Object.entries(SC.presets).map(([k, v]) => `<option value="${k}" ${k === SC.preset ? 'selected' : ''}>${v}</option>`).join('');
   $('#d-new').showModal();
 };
 $('#n-cancel').onclick = () => $('#d-new').close();
+const startMission = (body) => { post({ action: 'new', ...body }); lastCards = ''; seenTracks.clear(); $('#d-new').close(); };
 document.querySelectorAll('.scen button').forEach((b) => b.onclick = () => {
   const [preset, cas, fires, seed] = b.dataset.s.split(',');
-  post({ action: 'new', preset, casualties: +cas, fires: +fires, seed: +seed });
-  $('#log').innerHTML = ''; $('#d-new').close();
+  startMission({ preset, casualties: +cas, fires: +fires, seed: +seed });
 });
-$('#n-go').onclick = () => {
-  post({ action: 'new', preset: $('#n-preset').value, casualties: +$('#n-cas').value, fires: +$('#n-fires').value, seed: +$('#n-seed').value });
-  $('#log').innerHTML = ''; $('#d-new').close();
-};
+$('#n-go').onclick = () => startMission({ preset: $('#n-preset').value, casualties: +$('#n-cas').value, fires: +$('#n-fires').value, seed: +$('#n-seed').value });
+// METHANE
+$('#b-methane').onclick = () => $('#d-methane').showModal();
+$('#m-close').onclick = () => $('#d-methane').close();
+$('#m-copy').onclick = () => navigator.clipboard?.writeText($('#methane').textContent);
 // sound (browser needs a click before audio may play)
 let sound = false;
-$('#b-sound').onclick = (e) => { sound = !sound; e.target.textContent = 'Sound: ' + (sound ? 'on' : 'off'); e.target.classList.toggle('on', sound); };
+$('#b-sound').onclick = (e) => {
+  sound = !sound; const b = e.currentTarget;
+  b.lastChild.textContent = sound ? 'Sound on' : 'Sound off'; b.classList.toggle('on', sound); b.setAttribute('aria-pressed', sound);
+};
 let audioBusy = 0;
 function play(ev) {
   if (!sound || performance.now() < audioBusy) return;
   const lvl = ev.db >= 55 ? 'near' : ev.db >= 42 ? 'mid' : 'far';
-  const a = new Audio(`/assets/audio/${ev.sound}${ev.sound.startsWith('robot_') ? '' : '_' + lvl}.wav`);
-  a.play().catch(() => {});
+  new Audio(`/assets/audio/${ev.sound}${ev.sound.startsWith('robot_') ? '' : '_' + lvl}.wav`).play().catch(() => {});
   audioBusy = performance.now() + (ev.sound.startsWith('robot_') ? 4500 : 2500);
 }
 
@@ -571,13 +683,12 @@ $('#b-robot').onclick = () => {
   const c = $('#robotc');
   const r = new THREE.WebGLRenderer({ canvas: c, antialias: true, alpha: true });
   const lab = new CSS2DRenderer();
-  lab.domElement.style.position = 'absolute'; lab.domElement.style.pointerEvents = 'none';
-  c.parentElement.style.position = 'relative'; c.parentElement.append(lab.domElement);
-  lab.domElement.style.top = '0'; lab.domElement.style.left = '0';
+  Object.assign(lab.domElement.style, { position: 'absolute', pointerEvents: 'none', top: '0', left: '0' });
+  c.parentElement.append(lab.domElement);
   const s = new THREE.Scene();
   s.add(new THREE.HemisphereLight(0xffffff, 0x223344, 1.2));
   const dl = new THREE.DirectionalLight(0xffffff, 2); dl.position.set(2, -2, 3); s.add(dl);
-  const rb = buildRobot(true); s.add(rb);
+  s.add(buildRobot(true));
   const cam = new THREE.PerspectiveCamera(35, 1, 0.01, 20); cam.up.set(0, 0, 1); cam.position.set(1.0, -0.9, 0.7);
   const oc = new OrbitControls(cam, c); oc.target.set(0, 0, 0.2); oc.autoRotate = true; oc.autoRotateSpeed = 1.2;
   showcase = () => {
@@ -622,8 +733,11 @@ function frame() {
     let maxG = 0;
     for (const th of ST.things) {
       const f = fires[th.i];
-      if (f) { f.on = th.burning; f.growth = th.growth; if (th.burning) maxG = Math.max(maxG, th.growth); }
       const m = thingMeshes[th.i];
+      if (f && m?.userData.spare && th.burning && (f.x !== th.xy[0] || f.y !== th.xy[1])) {  // unscripted fire moved in
+        f.x = th.xy[0]; f.y = th.xy[1]; f.light.position.set(f.x, f.y, 0.8); m.position.set(f.x, f.y, 0); m.visible = true;
+      }
+      if (f) { f.on = th.burning; f.growth = th.growth; if (th.burning) maxG = Math.max(maxG, th.growth); }
       if (m && m.userData.ember) m.userData.ember.scale.setScalar(1 + 2.2 * th.growth);
       if (m && m.userData.awake && th.mode) {
         m.visible = th.mode !== 'out';
@@ -644,16 +758,16 @@ function frame() {
       }
     }
     scene.fog.density = 0.012 + 0.03 * fill;
-    updateDynamic(ST, t);
+    updateDynamic(ST, t, dt);
     if (view === 'follow') {
       const d = new THREE.Vector3(Math.cos(smooth.yaw), Math.sin(smooth.yaw), 0);
-      const want = new THREE.Vector3(smooth.x, smooth.y, 0).addScaledVector(d, -2.0).add(new THREE.Vector3(0, 0, 1.6));
+      const want = new THREE.Vector3(smooth.x, smooth.y, 0).addScaledVector(d, -1.8).add(new THREE.Vector3(0, 0, 3.4));
       camera.position.lerp(want, 1 - Math.exp(-dt * 4));
-      camera.lookAt(smooth.x + d.x * 1.2, smooth.y + d.y * 1.2, 0.2);
+      camera.lookAt(smooth.x + d.x * 0.9, smooth.y + d.y * 0.9, 0.1);
     } else if (view === 'eye') {
       const d = new THREE.Vector3(Math.cos(smooth.yaw), Math.sin(smooth.yaw), 0);
-      camera.position.set(smooth.x + d.x * 0.17, smooth.y + d.y * 0.17, 0.36);
-      camera.lookAt(smooth.x + d.x * 3, smooth.y + d.y * 3, 0.25);
+      camera.position.set(smooth.x + d.x * 0.25, smooth.y + d.y * 0.25, 0.4);   // thermal camera mount
+      camera.lookAt(smooth.x + d.x * 3, smooth.y + d.y * 3, 0.3);
     } else controls.update();
   }
   composer.render();
